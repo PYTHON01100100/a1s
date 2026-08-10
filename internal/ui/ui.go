@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -43,10 +42,11 @@ type App struct {
 	selectedName string
 	ollamaModel  string
 	ollamaURL    string
+	editor       *lineEditor
 }
 
 func New(cfg config.Config, cloud *aliyun.Client, aic *ai.Client) *App {
-	return &App{cfg: cfg, cloud: cloud, ai: aic, ollamaURL: "http://127.0.0.1:11434"}
+	return &App{cfg: cfg, cloud: cloud, ai: aic, ollamaURL: "http://127.0.0.1:11434", editor: newLineEditor()}
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -58,13 +58,15 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.help()
 
-	s := bufio.NewScanner(os.Stdin)
 	for {
-		a.prompt()
-		if !s.Scan() {
-			return s.Err()
+		line, err := a.editor.ReadLine(a.promptText(), a.completions)
+		if err != nil {
+			if err.Error() == "EOF" {
+				return nil
+			}
+			return err
 		}
-		line := strings.TrimSpace(s.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -109,25 +111,24 @@ func (a *App) header() {
 	fmt.Println(dim + "────────────────────────────────────────────────────────────────────────" + reset)
 }
 
-func (a *App) prompt() {
+func (a *App) promptText() string {
 	scope := blank(a.cfg.Profile, "default") + "/" + blank(a.cfg.Region, "auto")
 	selected := ""
 	if a.selectedID != "" {
 		selected = " " + orange + "[" + blank(a.selectedName, a.selectedID) + "]" + reset
 	}
-	fmt.Printf("\n%s%s%s%s%s a1s%s%s › ", dim, "[", scope, "]", reset, selected, orange)
-	fmt.Print(reset)
+	return fmt.Sprintf("\n%s[%s]%s%s a1s%s%s › ", dim, scope, reset, selected, orange, reset)
 }
 
 func (a *App) help() {
 	fmt.Println()
 	fmt.Println(orange + bold + " QUICK COMMANDS" + reset)
-	fmt.Printf("  %secs/ls%s inventory      %suse 1%s select ECS      %smetrics%s CPU       %srun <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %secs/ls%s inventory      %suse 1%s select ECS      %smetrics%s CPU       %srun <ecs> <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %squick list%s shortcuts  %sdoctor%s health         %sbill%s costs        %sreport%s markdown\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %suptime%s selected ECS   %sdisk%s filesystem       %smemory%s RAM        %sports%s listeners\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %sfailed%s services       %sollama status%s local AI %sollama models%s    %sai <q>%s ask AI\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %scurrency%s USD|SAR      %sclear%s home            %shelp/?%s          %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Println(dim + "  Tip: run `quick list` for safe ECS shortcuts, or `ollama use <model>` to connect local AI." + reset)
+	fmt.Println(dim + "  Tip: ↑/↓ history • ←/→ edit • Tab autocomplete • run <ecs-name> <command> • ai providers" + reset)
 }
 
 func (a *App) demoNotice() {
@@ -239,10 +240,7 @@ func (a *App) handle(ctx context.Context, line string) error {
 	case "ollama":
 		return a.handleOllama(ctx, parts[1:], strings.TrimSpace(rest))
 	case "ai", "a":
-		if rest == "" {
-			return fmt.Errorf("usage: ai <question>")
-		}
-		return a.askAI(ctx, rest)
+		return a.handleAI(ctx, parts[1:], rest)
 	case "currency":
 		if len(parts) < 2 {
 			return fmt.Errorf("usage: currency USD|SAR")
@@ -417,7 +415,7 @@ func (a *App) selectInstance(ref string) error {
 		return nil
 	}
 	for _, x := range a.instances {
-		if x.ID == ref {
+		if x.ID == ref || strings.EqualFold(x.Name, ref) {
 			a.selectedID, a.selectedName = x.ID, x.Name
 			fmt.Printf("%s✓ Selected%s %s%s%s\n", green, reset, orange, blank(x.Name, x.ID), reset)
 			return nil
@@ -450,18 +448,32 @@ func (a *App) resolveMetricsArgs(args []string) (string, int, error) {
 func (a *App) resolveRunArgs(rest string) (string, string, error) {
 	rest = strings.TrimSpace(rest)
 	if rest == "" {
-		return "", "", fmt.Errorf("usage after selecting: run <command>; legacy: run <instance-id> <command>")
+		return "", "", fmt.Errorf("usage: run <ecs-name|instance-id> <command> OR select with use <ecs> then run <command>")
 	}
 	fields := strings.Fields(rest)
-	if len(fields) >= 2 && strings.HasPrefix(fields[0], "i-") {
-		id := fields[0]
-		shell := strings.TrimSpace(strings.TrimPrefix(rest, id))
-		return id, shell, nil
+	if len(fields) >= 2 {
+		target := fields[0]
+		if id, ok := a.resolveInstanceRef(target); ok {
+			shell := strings.TrimSpace(strings.TrimPrefix(rest, target))
+			return id, shell, nil
+		}
 	}
 	if a.selectedID == "" {
-		return "", "", fmt.Errorf("select an ECS first: use <row-number>, or run <instance-id> <command>")
+		return "", "", fmt.Errorf("ECS target not found. Example: run test pwd, or use test then run pwd")
 	}
 	return a.selectedID, rest, nil
+}
+
+func (a *App) resolveInstanceRef(ref string) (string, bool) {
+	if n, err := strconv.Atoi(ref); err == nil && n >= 1 && n <= len(a.instances) {
+		return a.instances[n-1].ID, true
+	}
+	for _, x := range a.instances {
+		if x.ID == ref || strings.EqualFold(x.Name, ref) {
+			return x.ID, true
+		}
+	}
+	return "", false
 }
 
 func (a *App) ecs(ctx context.Context) error {
@@ -470,31 +482,27 @@ func (a *App) ecs(ctx context.Context) error {
 		return err
 	}
 	a.instances = xs
-
 	fmt.Println()
 	fmt.Printf(" %s%sECS INSTANCES%s  %s%d resources%s\n", orange, bold, reset, dim, len(xs), reset)
-	fmt.Println(dim + " ───────────────────────────────────────────────────────────────────────────────────────────" + reset)
-	fmt.Printf(" %s%-3s %-20s %-23s %-10s %-19s %-17s %-15s%s\n", gray, "#", "NAME", "INSTANCE ID", "STATUS", "TYPE", "ZONE", "PRIVATE IP", reset)
+	fmt.Println(dim + " ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────" + reset)
+	fmt.Printf(" %s%-3s %-16s %-20s %-9s %-18s %-17s %-15s %-15s%s\n", gray, "#", "NAME", "INSTANCE ID", "STATUS", "TYPE", "OS", "INTERNAL IP", "EXTERNAL IP", reset)
 	for i, x := range xs {
-		statusColor := yellow
-		marker := " "
+		sc := yellow
 		if strings.EqualFold(x.Status, "Running") {
-			statusColor = green
+			sc = green
 		} else if strings.EqualFold(x.Status, "Stopped") {
-			statusColor = red
+			sc = red
 		}
+		marker := " "
 		if x.ID == a.selectedID {
 			marker = "›"
 		}
-		fmt.Printf(" %s%s%-3d%s %-20s %s%-23s%s %s%-10s%s %-19s %-17s %-15s\n",
-			orange, marker, i+1, reset,
-			clip(blank(x.Name, "-"), 20), dim, clip(x.ID, 23), reset,
-			statusColor, clip(x.Status, 10), reset,
-			clip(x.Type, 19), clip(x.Zone, 17), clip(x.PrivateIP, 15))
+		fmt.Printf(" %s%s%-3d%s %-16s %s%-20s%s %s%-9s%s %-18s %-17s %-15s %-15s\n", orange, marker, i+1, reset, clip(blank(x.Name, "-"), 16), dim, clip(x.ID, 20), reset, sc, clip(x.Status, 9), reset, clip(x.Type, 18), clip(blank(x.OSName, x.OSType), 17), clip(blank(x.PrivateIP, "-"), 15), clip(blank(x.PublicIP, "-"), 15))
+		fmt.Printf("     %sBilling:%s %-14s  %sVPC:%s %s (%s)  %svSwitch:%s %s (%s)  %sZone:%s %s\n", gray, reset, blank(x.ChargeType, "-"), gray, reset, blank(x.VPCName, "-"), blank(x.VPCID, "-"), gray, reset, blank(x.VSwitchName, "-"), blank(x.VSwitchID, "-"), gray, reset, blank(x.Zone, "-"))
 	}
-	fmt.Println(dim + " ───────────────────────────────────────────────────────────────────────────────────────────" + reset)
-	if len(xs) > 0 && a.selectedID == "" {
-		fmt.Printf(" %sTip:%s %suse 1%s selects the first instance; no more copying instance IDs.\n", dim, reset, cyan, reset)
+	fmt.Println(dim + " ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────" + reset)
+	if len(xs) > 0 {
+		fmt.Printf(" %sTip:%s run %s%s%s pwd  •  use %s%s%s  •  Tab completes ECS names.\n", dim, reset, cyan, xs[0].Name, reset, cyan, xs[0].Name, reset)
 	}
 	return nil
 }
@@ -619,6 +627,139 @@ func (a *App) askAI(ctx context.Context, q string) error {
 	}
 	fmt.Printf("\n%s%sAI COPILOT%s\n%s\n", orange, bold, reset, ans)
 	return nil
+}
+
+func (a *App) handleAI(ctx context.Context, args []string, rest string) error {
+	if len(args) == 0 || strings.EqualFold(args[0], "providers") {
+		fmt.Println()
+		fmt.Println(orange + bold + " AI PROVIDERS" + reset)
+		fmt.Printf("  %sollama%s             local models on this machine\n", cyan, reset)
+		fmt.Printf("  %sopenai-compatible%s  A1S_AI_BASE_URL / vLLM / LiteLLM / DashScope-compatible endpoint\n", cyan, reset)
+		if a.ai.Enabled() {
+			fmt.Printf("  %sactive%s             %s @ %s\n", green, reset, a.ai.Model, a.ai.BaseURL)
+		} else {
+			fmt.Printf("  %sactive%s             not configured\n", yellow, reset)
+		}
+		fmt.Println(dim + "  Use: ai use ollama  →  ai models  →  ai model <number|name>  →  ai ask <question>" + reset)
+		return nil
+	}
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "use":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ai use ollama|openai-compatible")
+		}
+		if strings.EqualFold(args[1], "ollama") {
+			models, err := a.ollamaModels(ctx)
+			if err != nil {
+				return fmt.Errorf("Ollama unavailable: %w", err)
+			}
+			a.ai.BaseURL = strings.TrimRight(a.ollamaURL, "/") + "/v1"
+			a.ai.APIKey = "ollama"
+			if len(models) > 0 && a.ai.Model == "" {
+				a.ai.Model = models[0]
+			}
+			fmt.Printf("%s✓ AI provider: Ollama%s\n", green, reset)
+			return a.showAIModels(ctx)
+		}
+		return fmt.Errorf("openai-compatible uses A1S_AI_BASE_URL, A1S_AI_MODEL and optional A1S_AI_API_KEY at startup")
+	case "models":
+		return a.showAIModels(ctx)
+	case "model":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ai model <number|name>")
+		}
+		models, err := a.ollamaModels(ctx)
+		if err != nil {
+			return err
+		}
+		choice := args[1]
+		if n, e := strconv.Atoi(choice); e == nil {
+			if n < 1 || n > len(models) {
+				return fmt.Errorf("model number must be 1-%d", len(models))
+			}
+			choice = models[n-1]
+		}
+		found := false
+		for _, m := range models {
+			if m == choice {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("model %q is not installed locally", choice)
+		}
+		a.ai.BaseURL = strings.TrimRight(a.ollamaURL, "/") + "/v1"
+		a.ai.APIKey = "ollama"
+		a.ai.Model = choice
+		a.ollamaModel = choice
+		fmt.Printf("%s✓ AI model:%s %s%s%s\n", green, reset, orange, choice, reset)
+		return nil
+	case "ask":
+		q := strings.TrimSpace(strings.TrimPrefix(rest, args[0]))
+		if q == "" {
+			return fmt.Errorf("usage: ai ask <question>")
+		}
+		return a.askAI(ctx, q)
+	default:
+		return a.askAI(ctx, rest)
+	}
+}
+
+func (a *App) showAIModels(ctx context.Context) error {
+	models, err := a.ollamaModels(ctx)
+	if err != nil {
+		return fmt.Errorf("Ollama unavailable: %w", err)
+	}
+	fmt.Println()
+	fmt.Println(orange + bold + " LOCAL AI MODELS" + reset)
+	if len(models) == 0 {
+		fmt.Println(dim + "  No Ollama models installed." + reset)
+		return nil
+	}
+	for i, m := range models {
+		mark := " "
+		if m == a.ai.Model {
+			mark = "›"
+		}
+		fmt.Printf(" %s%s%2d%s  %s\n", orange, mark, i+1, reset, m)
+	}
+	return nil
+}
+
+func (a *App) completions(line string) []string {
+	base := []string{"ecs", "ls", "use ", "run ", "metrics ", "quick", "quick list", "uptime", "disk", "memory", "failed", "ports", "doctor", "bill", "report", "ai", "ai providers", "ai use ollama", "ai models", "ai model ", "ai ask ", "ollama status", "ollama models", "currency SAR", "currency USD", "clear", "help", "quit"}
+	trim := strings.TrimSpace(line)
+	out := []string{}
+	if strings.HasPrefix(trim, "run ") || strings.HasPrefix(trim, "use ") || strings.HasPrefix(trim, "metrics ") {
+		parts := strings.Fields(line)
+		if len(parts) <= 2 {
+			prefix := ""
+			if len(parts) > 1 {
+				prefix = parts[1]
+			}
+			cmd := parts[0] + " "
+			for _, x := range a.instances {
+				if strings.HasPrefix(strings.ToLower(x.Name), strings.ToLower(prefix)) {
+					suffix := ""
+					if parts[0] == "run" {
+						suffix = " "
+					}
+					out = append(out, cmd+x.Name+suffix)
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+	for _, c := range base {
+		if strings.HasPrefix(strings.ToLower(c), strings.ToLower(trim)) {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func blank(s, d string) string {

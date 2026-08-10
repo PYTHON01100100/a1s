@@ -1,14 +1,22 @@
 package model
 
 type ECSInstance struct {
-	ID         string
-	Name       string
-	Status     string
-	Type       string
-	Zone       string
-	PrivateIP  string
-	PublicIP   string
-	CPUPercent float64
+	ID          string
+	Name        string
+	Status      string
+	Type        string
+	Zone        string
+	PrivateIP   string
+	PublicIP    string
+	OSName      string
+	OSType      string
+	ImageID     string
+	ChargeType  string
+	VPCID       string
+	VPCName     string
+	VSwitchID   string
+	VSwitchName string
+	CPUPercent  float64
 }
 
 type MetricPoint struct {
@@ -39,3 +47,7 @@ type PriceQuote struct {
 	TradePrice    float64
 	Currency      string
 }
+
+// Backward-compatible aliases for older internal packages.
+type Bill = BillSummary
+type RunResult = CommandResult

@@ -18,7 +18,6 @@ import (
 type Runner interface {
 	Run(ctx context.Context, args ...string) ([]byte, error)
 }
-
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
@@ -46,21 +45,18 @@ func New(cfg config.Config, r Runner) *Client {
 	}
 	return &Client{cfg: cfg, runner: r}
 }
-
 func (c *Client) common(args []string) []string {
 	if c.cfg.Profile != "" {
 		args = append(args, "--profile", c.cfg.Profile)
 	}
 	return args
 }
-
 func (c *Client) regionArgs(args []string) []string {
 	if c.cfg.Region != "" {
 		args = append(args, "--RegionId", c.cfg.Region)
 	}
 	return c.common(args)
 }
-
 func (c *Client) CheckCLI(ctx context.Context) error {
 	_, err := c.runner.Run(ctx, "version")
 	return err
@@ -68,7 +64,7 @@ func (c *Client) CheckCLI(ctx context.Context) error {
 
 func (c *Client) ListInstances(ctx context.Context) ([]model.ECSInstance, error) {
 	if c.cfg.Demo {
-		return demoInstances(), nil
+		return []model.ECSInstance{}, nil
 	}
 	out, err := c.runner.Run(ctx, c.regionArgs([]string{"ecs", "DescribeInstances", "--PageSize", "100"})...)
 	if err != nil {
@@ -82,33 +78,54 @@ func (c *Client) ListInstances(ctx context.Context) ([]model.ECSInstance, error)
 	res := make([]model.ECSInstance, 0, len(items))
 	for _, x := range items {
 		m, _ := x.(map[string]any)
-		res = append(res, model.ECSInstance{
-			ID: str(m["InstanceId"]), Name: str(m["InstanceName"]), Status: str(m["Status"]),
-			Type: str(m["InstanceType"]), Zone: str(m["ZoneId"]),
-			PrivateIP: firstIP(m, "VpcAttributes", "PrivateIpAddress", "IpAddress"),
-			PublicIP:  firstIP(m, "PublicIpAddress", "IpAddress"),
-		})
+		vpc := digMap(m, "VpcAttributes")
+		res = append(res, model.ECSInstance{ID: str(m["InstanceId"]), Name: str(m["InstanceName"]), Status: str(m["Status"]), Type: str(m["InstanceType"]), Zone: str(m["ZoneId"]), PrivateIP: firstIP(m, "VpcAttributes", "PrivateIpAddress", "IpAddress"), PublicIP: firstIP(m, "PublicIpAddress", "IpAddress"), OSName: str(m["OSName"]), OSType: str(m["OSType"]), ImageID: str(m["ImageId"]), ChargeType: str(m["InstanceChargeType"]), VPCID: str(vpc["VpcId"]), VSwitchID: str(vpc["VSwitchId"])})
 	}
+	c.enrichNetworkNames(ctx, res)
 	return res, nil
 }
 
-func (c *Client) CPU(ctx context.Context, instanceID string, minutes int) ([]model.MetricPoint, error) {
-	if c.cfg.Demo {
-		return demoMetrics(), nil
+func (c *Client) enrichNetworkNames(ctx context.Context, xs []model.ECSInstance) {
+	vpcs := map[string]string{}
+	vsw := map[string]string{}
+	if out, err := c.runner.Run(ctx, c.regionArgs([]string{"vpc", "DescribeVpcs", "--PageNumber", "1", "--PageSize", "100"})...); err == nil {
+		var raw map[string]any
+		if json.Unmarshal(out, &raw) == nil {
+			for _, x := range digSlice(raw, "Vpcs", "Vpc") {
+				m, _ := x.(map[string]any)
+				vpcs[str(m["VpcId"])] = str(m["VpcName"])
+			}
+		}
 	}
+	if out, err := c.runner.Run(ctx, c.regionArgs([]string{"vpc", "DescribeVSwitches", "--PageNumber", "1", "--PageSize", "100"})...); err == nil {
+		var raw map[string]any
+		if json.Unmarshal(out, &raw) == nil {
+			for _, x := range digSlice(raw, "VSwitches", "VSwitch") {
+				m, _ := x.(map[string]any)
+				vsw[str(m["VSwitchId"])] = str(m["VSwitchName"])
+			}
+		}
+	}
+	for i := range xs {
+		xs[i].VPCName = vpcs[xs[i].VPCID]
+		xs[i].VSwitchName = vsw[xs[i].VSwitchID]
+	}
+}
+
+func (c *Client) CPU(ctx context.Context, id string, minutes int) ([]model.MetricPoint, error) {
 	if minutes <= 0 {
 		minutes = 60
 	}
 	end := time.Now().UnixMilli()
 	start := time.Now().Add(-time.Duration(minutes) * time.Minute).UnixMilli()
-	dim := fmt.Sprintf(`{"instanceId":"%s"}`, instanceID)
+	dim := fmt.Sprintf(`{"instanceId":"%s"}`, id)
 	args := []string{"cms", "DescribeMetricList", "--Namespace", "acs_ecs_dashboard", "--MetricName", "CPUUtilization", "--Dimensions", dim, "--StartTime", strconv.FormatInt(start, 10), "--EndTime", strconv.FormatInt(end, 10), "--Period", "60"}
 	out, err := c.runner.Run(ctx, c.common(args)...)
 	if err != nil {
 		return nil, err
 	}
 	var raw map[string]any
-	if err := json.Unmarshal(out, &raw); err != nil {
+	if json.Unmarshal(out, &raw) != nil {
 		return nil, err
 	}
 	datapoints := str(raw["Datapoints"])
@@ -125,15 +142,11 @@ func (c *Client) CPU(ctx context.Context, instanceID string, minutes int) ([]mod
 	}
 	return pts, nil
 }
-
-func (c *Client) RunCommand(ctx context.Context, instanceID, command string) (model.CommandResult, error) {
+func (c *Client) RunCommand(ctx context.Context, id, command string) (model.CommandResult, error) {
 	if c.cfg.ReadOnly {
 		return model.CommandResult{}, errors.New("read-only mode: command execution is disabled")
 	}
-	if c.cfg.Demo {
-		return model.CommandResult{InvokeID: "demo-invoke-001", Status: "Finished", Output: demoCommandOutput(command), ExitCode: 0}, nil
-	}
-	args := []string{"ecs", "RunCommand", "--Type", "RunShellScript", "--CommandContent", command, "--ContentEncoding", "PlainText", "--InstanceId.1", instanceID, "--KeepCommand", "false"}
+	args := []string{"ecs", "RunCommand", "--Type", "RunShellScript", "--CommandContent", command, "--ContentEncoding", "PlainText", "--InstanceId.1", id, "--KeepCommand", "false"}
 	out, err := c.runner.Run(ctx, c.regionArgs(args)...)
 	if err != nil {
 		return model.CommandResult{}, err
@@ -149,12 +162,7 @@ func (c *Client) RunCommand(ctx context.Context, instanceID, command string) (mo
 	}
 	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			return model.CommandResult{}, ctx.Err()
-		default:
-		}
-		res, done, err := c.invocationResult(ctx, rr.InvokeID, instanceID)
+		res, done, err := c.invocationResult(ctx, rr.InvokeID, id)
 		if err != nil {
 			return model.CommandResult{}, err
 		}
@@ -165,9 +173,8 @@ func (c *Client) RunCommand(ctx context.Context, instanceID, command string) (mo
 	}
 	return model.CommandResult{InvokeID: rr.InvokeID, Status: "Timeout"}, errors.New("timed out waiting for Cloud Assistant result")
 }
-
-func (c *Client) invocationResult(ctx context.Context, invokeID, instanceID string) (model.CommandResult, bool, error) {
-	args := []string{"ecs", "DescribeInvocationResults", "--InvokeId", invokeID, "--InstanceId", instanceID, "--ContentEncoding", "PlainText", "--MaxResults", "10"}
+func (c *Client) invocationResult(ctx context.Context, invokeID, id string) (model.CommandResult, bool, error) {
+	args := []string{"ecs", "DescribeInvocationResults", "--InvokeId", invokeID, "--InstanceId", id, "--ContentEncoding", "PlainText", "--MaxResults", "10"}
 	out, err := c.runner.Run(ctx, c.regionArgs(args)...)
 	if err != nil {
 		return model.CommandResult{}, false, err
@@ -186,11 +193,7 @@ func (c *Client) invocationResult(ctx context.Context, invokeID, instanceID stri
 	done := status == "Finished" || status == "Failed" || status == "Stopped" || status == "Terminated"
 	return res, done, nil
 }
-
 func (c *Client) Bill(ctx context.Context, cycle string) (model.BillSummary, error) {
-	if c.cfg.Demo {
-		return model.BillSummary{BillingCycle: cycle, PretaxAmount: 2840.50, Currency: "USD"}, nil
-	}
 	args := []string{"bssopenapi", "QueryAccountBill", "--BillingCycle", cycle, "--PageNum", "1", "--PageSize", "100"}
 	out, err := c.runner.Run(ctx, c.common(args)...)
 	if err != nil {
@@ -209,35 +212,13 @@ func (c *Client) Bill(ctx context.Context, cycle string) (model.BillSummary, err
 	}
 	amount := f64(raw["PretaxAmount"])
 	if amount == 0 {
-		items := digSlice(raw, "Data", "Items", "Item")
-		for _, x := range items {
+		for _, x := range digSlice(raw, "Data", "Items", "Item") {
 			if m, ok := x.(map[string]any); ok {
 				amount += f64(m["PretaxAmount"])
 			}
 		}
 	}
 	return model.BillSummary{BillingCycle: cycle, PretaxAmount: amount, Currency: cur}, nil
-}
-
-func demoInstances() []model.ECSInstance {
-	return []model.ECSInstance{
-		{ID: "i-demo-web01", Name: "web-prod-01", Status: "Running", Type: "ecs.g8i.large", Zone: "me-central-1a", PrivateIP: "10.0.1.10", PublicIP: "8.213.10.10"},
-		{ID: "i-demo-api01", Name: "api-prod-01", Status: "Running", Type: "ecs.g8i.xlarge", Zone: "me-central-1a", PrivateIP: "10.0.1.11"},
-		{ID: "i-demo-gpu01", Name: "llm-gpu-01", Status: "Running", Type: "ecs.gn8is.2xlarge", Zone: "me-central-1b", PrivateIP: "10.0.2.20"},
-	}
-}
-func demoMetrics() []model.MetricPoint {
-	now := time.Now().UnixMilli()
-	return []model.MetricPoint{{Timestamp: now - 120000, Average: 32, Maximum: 48, Minimum: 18}, {Timestamp: now - 60000, Average: 57, Maximum: 88, Minimum: 31}, {Timestamp: now, Average: 73, Maximum: 94, Minimum: 45}}
-}
-func demoCommandOutput(cmd string) string {
-	if strings.Contains(cmd, "nginx") {
-		return "active\n"
-	}
-	if strings.Contains(cmd, "df") {
-		return "Filesystem Size Used Avail Use% Mounted on\n/dev/vda1 40G 29G 11G 73% /\n"
-	}
-	return "demo: command completed successfully\n"
 }
 
 func str(v any) string {
@@ -263,6 +244,21 @@ func f64(v any) float64 {
 	return 0
 }
 func i64(v any) int64 { return int64(f64(v)) }
+func digMap(m map[string]any, keys ...string) map[string]any {
+	var cur any = m
+	for _, k := range keys {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return map[string]any{}
+		}
+		cur = mm[k]
+	}
+	mm, _ := cur.(map[string]any)
+	if mm == nil {
+		return map[string]any{}
+	}
+	return mm
+}
 func digSlice(m map[string]any, keys ...string) []any {
 	var cur any = m
 	for _, k := range keys {
@@ -272,10 +268,8 @@ func digSlice(m map[string]any, keys ...string) []any {
 		}
 		cur = mm[k]
 	}
-	if s, ok := cur.([]any); ok {
-		return s
-	}
-	return nil
+	s, _ := cur.([]any)
+	return s
 }
 func firstIP(m map[string]any, keys ...string) string {
 	var cur any = m

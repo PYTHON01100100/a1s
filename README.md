@@ -1,66 +1,47 @@
-# a1s UI Upgrade v2
+# a1s UI Upgrade v3
 
-Drop these files into the matching paths in your `a1s` repository, then rebuild.
+Drop these files into the matching paths in the a1s repository, then rebuild.
 
 ## What changed
 
-- `--demo` is now UI-only: no Alibaba Cloud calls and no fake ECS/billing/metrics are displayed.
-- `--sample-data` explicitly enables the old local sample-data behavior.
-- Better `--help` output.
-- Quick ECS shortcuts after selecting an instance: `uptime`, `disk`, `memory`, `failed`, `ports`, and `quick`.
-- Ollama integration:
-  - `ollama status`
-  - `ollama models`
-  - `ollama start`
-  - `ollama use <model>`
-  - `ollama ask <question>`
-  - after `ollama use <model>`, normal `ai <question>` uses Ollama through its OpenAI-compatible `/v1/chat/completions` API.
-- Keeps aliyun-cli profile/region auto-detection from the previous upgrade.
+- `run <ecs-name> <command>` targets ECS by **instance name**, ID, or row number.
+- `use <row|name|instance-id>` supports names too.
+- ECS inventory now shows: internal/private IP, external/public IP, instance type, OS, billing/charge type, VPC ID + name, vSwitch ID + name, zone.
+- VPC/vSwitch names are resolved from Alibaba Cloud VPC APIs after `DescribeInstances`.
+- Linux interactive line editor: Up/Down command history, Left/Right cursor movement, Tab autocomplete.
+- Autocomplete suggests a1s commands and ECS names for `run`, `use`, and `metrics`.
+- AI is now grouped under `ai`:
+  - `ai providers`
+  - `ai use ollama`
+  - `ai models`
+  - `ai model <number|name>`
+  - `ai ask <question>`
+- Ollama model selection only accepts models already installed on the machine.
 
-## Build
+## Install
 
 ```bash
+cp -r cmd internal /path/to/a1s/
+cd /path/to/a1s
+gofmt -w cmd internal
 go test ./...
 go build -o bin/a1s ./cmd/a1s
-```
-
-## Real Alibaba Cloud account
-
-Do **not** use `--demo`:
-
-```bash
-aliyun configure list
 ./bin/a1s --currency SAR
 ```
 
-Only resources returned by the configured aliyun-cli account/region are displayed.
-
-## UI-only test
-
-```bash
-./bin/a1s --demo --currency SAR
-```
-
-No resources or billing data are invented in this mode.
-
-## Explicit sample-data test
-
-```bash
-./bin/a1s --sample-data --currency SAR
-```
-
-Use this only when you deliberately want fake local data for screenshots or smoke tests.
-
-## Ollama
-
-If Ollama is installed:
+## Examples
 
 ```text
-ollama status
-ollama start
-ollama models
-ollama use qwen3:8b
-ai explain the health of my selected ECS
+run test pwd
+run test uptime
+use test
+run df -h
+
+ai providers
+ai use ollama
+ai models
+ai model 1
+ai ask summarize my ECS environment
 ```
 
-`ollama use` configures the existing a1s OpenAI-compatible AI client to use `http://127.0.0.1:11434/v1` for the current session.
+Alibaba Cloud permissions used for the richer inventory include `ecs:DescribeInstances`, `vpc:DescribeVpcs`, and `vpc:DescribeVSwitches` in addition to the permissions already used by a1s.

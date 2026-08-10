@@ -13,7 +13,7 @@ import (
 	"a1s/internal/ui"
 )
 
-var version = "0.2.0-ui"
+var version = "0.3.0-ui"
 
 func main() {
 	cfg := config.FromEnv()
@@ -42,6 +42,15 @@ func main() {
 		fmt.Fprintln(out, "  a1s --demo")
 		fmt.Fprintln(out, "  a1s --sample-data --currency SAR")
 		fmt.Fprintln(out, "  a1s --version")
+		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "INTERACTIVE")
+		fmt.Fprintln(out, "  run <ecs-name> <command>      target ECS by name")
+		fmt.Fprintln(out, "  use <row|name|instance-id>    select ECS")
+		fmt.Fprintln(out, "  ai providers                  list AI providers")
+		fmt.Fprintln(out, "  ai use ollama                 use local Ollama")
+		fmt.Fprintln(out, "  ai models                     list installed models")
+		fmt.Fprintln(out, "  ai model <number|name>        choose model")
+		fmt.Fprintln(out, "  ↑/↓ history, ←/→ cursor, Tab autocomplete (Linux terminals)")
 	}
 
 	region := flag.String("region", cfg.Region, "Alibaba Cloud region, e.g. me-central-1")
