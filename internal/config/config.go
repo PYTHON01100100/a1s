@@ -15,6 +15,7 @@ type Config struct {
 	SARPerUSD    float64
 	ReadOnly     bool
 	Demo         bool
+	SampleData   bool
 	AIBaseURL    string
 	AIAPIKey     string
 	AIModel      string

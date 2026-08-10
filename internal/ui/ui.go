@@ -3,8 +3,11 @@ package ui
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -38,15 +41,19 @@ type App struct {
 	instances    []model.ECSInstance
 	selectedID   string
 	selectedName string
+	ollamaModel  string
+	ollamaURL    string
 }
 
 func New(cfg config.Config, cloud *aliyun.Client, aic *ai.Client) *App {
-	return &App{cfg: cfg, cloud: cloud, ai: aic}
+	return &App{cfg: cfg, cloud: cloud, ai: aic, ollamaURL: "http://127.0.0.1:11434"}
 }
 
 func (a *App) Run(ctx context.Context) error {
 	a.header()
-	if err := a.ecs(ctx); err != nil {
+	if a.cfg.Demo && !a.cfg.SampleData {
+		a.demoNotice()
+	} else if err := a.ecs(ctx); err != nil {
 		fmt.Println(yellow + "⚠ Could not load ECS inventory: " + reset + err.Error())
 	}
 	a.help()
@@ -74,8 +81,11 @@ func (a *App) Run(ctx context.Context) error {
 func (a *App) header() {
 	mode := "LIVE"
 	modeColor := green
-	if a.cfg.Demo {
-		mode = "DEMO"
+	if a.cfg.SampleData {
+		mode = "SAMPLE DATA"
+		modeColor = yellow
+	} else if a.cfg.Demo {
+		mode = "UI ONLY"
 		modeColor = yellow
 	}
 	access := "RW"
@@ -111,11 +121,20 @@ func (a *App) prompt() {
 
 func (a *App) help() {
 	fmt.Println()
-	fmt.Println(orange + bold + " QUICK KEYS / COMMANDS" + reset)
-	fmt.Printf("  %secs/ls%s inventory   %suse 1%s select ECS   %smetrics%s CPU   %srun <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %sdoctor%s health      %squick%s checks       %sbill%s costs    %sai <q>%s copilot\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %sreport%s markdown    %scurrency%s display    %sclear%s home   %s?%s help   %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Println(dim + "  Tip: select once with `use 1`, then `metrics`, `doctor`, `quick`, or `run uptime`." + reset)
+	fmt.Println(orange + bold + " QUICK COMMANDS" + reset)
+	fmt.Printf("  %secs/ls%s inventory      %suse 1%s select ECS      %smetrics%s CPU       %srun <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %squick list%s shortcuts  %sdoctor%s health         %sbill%s costs        %sreport%s markdown\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %suptime%s selected ECS   %sdisk%s filesystem       %smemory%s RAM        %sports%s listeners\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %sfailed%s services       %sollama status%s local AI %sollama models%s    %sai <q>%s ask AI\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %scurrency%s USD|SAR      %sclear%s home            %shelp/?%s          %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Println(dim + "  Tip: run `quick list` for safe ECS shortcuts, or `ollama use <model>` to connect local AI." + reset)
+}
+
+func (a *App) demoNotice() {
+	fmt.Println()
+	fmt.Println(yellow + bold + " UI-ONLY MODE" + reset)
+	fmt.Println("  No Alibaba Cloud APIs are called and no fake ECS, billing, metrics, or health data are shown.")
+	fmt.Println(dim + "  Use `a1s` without --demo for your real aliyun-cli account, or --sample-data for explicit samples." + reset)
 }
 
 func (a *App) handle(ctx context.Context, line string) error {
@@ -129,53 +148,96 @@ func (a *App) handle(ctx context.Context, line string) error {
 		return nil
 	case "clear", "home":
 		a.header()
+		if a.cfg.Demo && !a.cfg.SampleData {
+			a.demoNotice()
+			return nil
+		}
 		return a.ecs(ctx)
 	case "ecs", "ls":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
 		return a.ecs(ctx)
 	case "use", "select":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
 		if len(parts) < 2 {
 			return fmt.Errorf("usage: use <row-number|instance-id>")
 		}
 		return a.selectInstance(parts[1])
 	case "metrics", "m":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
 		id, mins, err := a.resolveMetricsArgs(parts[1:])
 		if err != nil {
 			return err
 		}
 		return a.metrics(ctx, id, mins)
 	case "run", "r":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
 		id, shell, err := a.resolveRunArgs(rest)
 		if err != nil {
 			return err
 		}
 		return a.runCmd(ctx, id, shell)
 	case "quick":
+		if len(parts) > 1 && strings.EqualFold(parts[1], "list") {
+			a.quickHelp()
+			return nil
+		}
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
 		id := a.selectedID
-		if len(parts) > 1 {
+		if len(parts) > 1 && strings.HasPrefix(parts[1], "i-") {
 			id = parts[1]
 		}
 		if id == "" {
 			return fmt.Errorf("select an ECS first: use <row-number>, or quick <instance-id>")
 		}
 		return a.quick(ctx, id)
+	case "uptime", "disk", "memory", "failed", "ports":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
+		if a.selectedID == "" {
+			return fmt.Errorf("select an ECS first with: use <row-number>")
+		}
+		return a.quickOne(ctx, a.selectedID, cmd)
+
 	case "doctor", "d":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
 		id := a.selectedID
 		if len(parts) > 1 {
 			id = parts[1]
 		}
 		return a.doctor(ctx, id)
 	case "bill", "$":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
 		cycle := time.Now().Format("2006-01")
 		if len(parts) > 1 {
 			cycle = parts[1]
 		}
 		return a.bill(ctx, cycle)
 	case "report":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
 		path := "a1s-report.md"
 		if len(parts) > 1 {
 			path = parts[1]
 		}
 		return a.makeReport(ctx, path)
+	case "ollama":
+		return a.handleOllama(ctx, parts[1:], strings.TrimSpace(rest))
 	case "ai", "a":
 		if rest == "" {
 			return fmt.Errorf("usage: ai <question>")
@@ -195,6 +257,150 @@ func (a *App) handle(ctx context.Context, line string) error {
 	default:
 		return fmt.Errorf("unknown command %q; type ? for help", cmd)
 	}
+}
+
+func (a *App) requireCloudData() error {
+	if a.cfg.Demo && !a.cfg.SampleData {
+		return fmt.Errorf("UI-only mode has no cloud/sample data; run `a1s` for your real account or `a1s --sample-data` for explicit samples")
+	}
+	return nil
+}
+
+func (a *App) quickHelp() {
+	fmt.Println()
+	fmt.Println(orange + bold + " QUICK ECS COMMANDS" + reset)
+	fmt.Printf("  %suptime%s   uptime and load\n", cyan, reset)
+	fmt.Printf("  %sdisk%s     df -h /\n", cyan, reset)
+	fmt.Printf("  %smemory%s   free -h\n", cyan, reset)
+	fmt.Printf("  %sfailed%s   failed systemd services\n", cyan, reset)
+	fmt.Printf("  %sports%s    listening TCP/UDP ports\n", cyan, reset)
+	fmt.Printf("  %squick%s    run all five checks\n", cyan, reset)
+	fmt.Println(dim + "  Select once with `use 1`, then run any shortcut directly." + reset)
+}
+
+func (a *App) quickOne(ctx context.Context, id, name string) error {
+	commands := map[string]string{
+		"uptime": "uptime",
+		"disk":   "df -h /",
+		"memory": "free -h 2>/dev/null || true",
+		"failed": "systemctl --failed --no-pager 2>/dev/null || true",
+		"ports":  "ss -tulpn 2>/dev/null | head -30 || true",
+	}
+	cmd, ok := commands[name]
+	if !ok {
+		return fmt.Errorf("unknown quick command %q", name)
+	}
+	return a.runCmd(ctx, id, cmd)
+}
+
+func (a *App) handleOllama(ctx context.Context, args []string, rest string) error {
+	if len(args) == 0 || strings.EqualFold(args[0], "status") {
+		models, err := a.ollamaModels(ctx)
+		if err != nil {
+			fmt.Printf("%s○ Ollama%s not reachable at %s\n", yellow, reset, a.ollamaURL)
+			fmt.Println(dim + "  Start it with: ollama start" + reset)
+			return nil
+		}
+		fmt.Printf("%s● Ollama%s running at %s • %d local model(s)\n", green, reset, a.ollamaURL, len(models))
+		if a.ollamaModel != "" {
+			fmt.Printf("  active model: %s%s%s\n", orange, a.ollamaModel, reset)
+		}
+		return nil
+	}
+
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "models", "list", "ls":
+		models, err := a.ollamaModels(ctx)
+		if err != nil {
+			return fmt.Errorf("Ollama is not reachable: %w", err)
+		}
+		fmt.Println()
+		fmt.Println(orange + bold + " OLLAMA MODELS" + reset)
+		if len(models) == 0 {
+			fmt.Println(dim + "  No local models installed." + reset)
+			return nil
+		}
+		for i, m := range models {
+			fmt.Printf("  %s%2d%s  %s\n", orange, i+1, reset, m)
+		}
+		return nil
+	case "use":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: ollama use <model>")
+		}
+		model := args[1]
+		a.ollamaModel = model
+		a.ai.BaseURL = strings.TrimRight(a.ollamaURL, "/") + "/v1"
+		a.ai.APIKey = "ollama"
+		a.ai.Model = model
+		fmt.Printf("%s✓ Ollama AI enabled%s  %s%s%s\n", green, reset, orange, model, reset)
+		fmt.Println(dim + "  Now use: ai <question>" + reset)
+		return nil
+	case "ask":
+		q := strings.TrimSpace(strings.TrimPrefix(rest, args[0]))
+		if q == "" {
+			return fmt.Errorf("usage: ollama ask <question>")
+		}
+		if a.ollamaModel == "" {
+			return fmt.Errorf("choose a model first: ollama use <model>")
+		}
+		return a.askAI(ctx, q)
+	case "start", "serve":
+		if _, err := exec.LookPath("ollama"); err != nil {
+			return fmt.Errorf("ollama executable not found in PATH")
+		}
+		if _, err := a.ollamaModels(ctx); err == nil {
+			fmt.Println(green + "✓ Ollama is already running." + reset)
+			return nil
+		}
+		cmd := exec.Command("ollama", "serve")
+		logf, err := os.OpenFile("/tmp/a1s-ollama.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return err
+		}
+		cmd.Stdout, cmd.Stderr = logf, logf
+		if err := cmd.Start(); err != nil {
+			logf.Close()
+			return err
+		}
+		_ = logf.Close()
+		fmt.Printf("%s✓ Ollama starting%s  pid=%d  log=/tmp/a1s-ollama.log\n", green, reset, cmd.Process.Pid)
+		return nil
+	default:
+		return fmt.Errorf("usage: ollama [status|models|start|use <model>|ask <question>]")
+	}
+}
+
+func (a *App) ollamaModels(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(a.ollamaURL, "/")+"/api/tags", nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Ollama returned %s", resp.Status)
+	}
+	var out struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(out.Models))
+	for _, m := range out.Models {
+		if strings.TrimSpace(m.Name) != "" {
+			models = append(models, m.Name)
+		}
+	}
+	return models, nil
 }
 
 func (a *App) selectInstance(ref string) error {
@@ -329,8 +535,8 @@ func (a *App) runCmd(ctx context.Context, id, cmd string) error {
 }
 
 func (a *App) quick(ctx context.Context, id string) error {
-	for _, q := range []string{"uptime", "df -h /", "free -h 2>/dev/null || true", "systemctl --failed --no-pager 2>/dev/null || true", "ss -tulpn 2>/dev/null | head -30 || true"} {
-		if err := a.runCmd(ctx, id, q); err != nil {
+	for _, name := range []string{"uptime", "disk", "memory", "failed", "ports"} {
+		if err := a.quickOne(ctx, id, name); err != nil {
 			fmt.Println(red + "  " + err.Error() + reset)
 		}
 	}
@@ -398,9 +604,13 @@ func (a *App) makeReport(ctx context.Context, path string) error {
 }
 
 func (a *App) askAI(ctx context.Context, q string) error {
-	xs, err := a.cloud.ListInstances(ctx)
-	if err != nil {
-		return err
+	var xs []model.ECSInstance
+	if !(a.cfg.Demo && !a.cfg.SampleData) {
+		var err error
+		xs, err = a.cloud.ListInstances(ctx)
+		if err != nil {
+			return err
+		}
 	}
 	ctxText := fmt.Sprintf("Region=%s Currency=%s ECS=%v\nQuestion=%s", a.cfg.Region, a.cfg.Currency, xs, q)
 	ans, err := a.ai.Ask(ctx, "You are a read-only Alibaba Cloud operations copilot inside a1s. Use supplied context. Give safe diagnostic guidance. Commands are suggestions only and require explicit user execution.", ctxText)
