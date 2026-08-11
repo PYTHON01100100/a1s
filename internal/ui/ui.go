@@ -117,7 +117,7 @@ func (a *App) promptText() string {
 	if a.selectedID != "" {
 		selected = " " + orange + "[" + blank(a.selectedName, a.selectedID) + "]" + reset
 	}
-	return fmt.Sprintf("\n%s[%s]%s%s a1s%s%s › ", dim, scope, reset, selected, orange, reset)
+	return fmt.Sprintf("%s[%s]%s%s a1s%s%s › ", dim, scope, reset, selected, orange, reset)
 }
 
 func (a *App) help() {
@@ -126,9 +126,106 @@ func (a *App) help() {
 	fmt.Printf("  %secs/ls%s inventory      %suse 1%s select ECS      %smetrics%s CPU       %srun <ecs> <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %squick list%s shortcuts  %sdoctor%s health         %sbill%s costs        %sreport%s markdown\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %suptime%s selected ECS   %sdisk%s filesystem       %smemory%s RAM        %sports%s listeners\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %sfailed%s services       %sollama status%s local AI %sollama models%s    %sai <q>%s ask AI\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %sfailed%s services       %sai providers%s AI setup   %sai models%s       %sai ask <q>%s ask AI\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %scurrency%s USD|SAR      %sclear%s home            %shelp/?%s          %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Println(dim + "  Tip: ↑/↓ history • ←/→ edit • Tab autocomplete • run <ecs-name> <command> • ai providers" + reset)
+	fmt.Println(dim + "  Tip: ↑/↓ history • ←/→ cursor • Tab autocomplete • <command> --help • help <command>" + reset)
+}
+
+func (a *App) fullHelp() {
+	fmt.Println()
+	fmt.Println(orange + bold + " A1S HELP" + reset)
+	fmt.Println(dim + " Alibaba Cloud terminal operations • commands are case-insensitive" + reset)
+	fmt.Println()
+	fmt.Println(white + bold + " RESOURCE BROWSING" + reset)
+	fmt.Printf("  %secs%s, %sls%s                    List ECS inventory and network details\n", cyan, reset, cyan, reset)
+	fmt.Printf("  %suse <row|name|id>%s          Select an ECS for following commands\n", cyan, reset)
+	fmt.Printf("  %smetrics [target] [minutes]%s Show CPU metrics (default 60 minutes)\n", cyan, reset)
+	fmt.Println()
+	fmt.Println(white + bold + " REMOTE EXECUTION" + reset)
+	fmt.Printf("  %srun <ecs-name> <command>%s   Execute on an ECS by name, row, or instance ID\n", cyan, reset)
+	fmt.Printf("  %srun <command>%s              Execute on the currently selected ECS\n", cyan, reset)
+	fmt.Printf("  %suptime | disk | memory%s     Safe shortcuts for selected ECS\n", cyan, reset)
+	fmt.Printf("  %sfailed | ports | quick%s     Service/port checks or all quick checks\n", cyan, reset)
+	fmt.Println()
+	fmt.Println(white + bold + " OPERATIONS & FINOPS" + reset)
+	fmt.Printf("  %sdoctor [target]%s            Infrastructure health summary\n", cyan, reset)
+	fmt.Printf("  %sbill [YYYY-MM]%s             Account billing summary\n", cyan, reset)
+	fmt.Printf("  %sreport [file.md]%s           Write a Markdown operations report\n", cyan, reset)
+	fmt.Printf("  %scurrency USD|SAR%s           Change display currency\n", cyan, reset)
+	fmt.Println()
+	fmt.Println(white + bold + " AI" + reset)
+	fmt.Printf("  %sai providers%s               Show supported/configured providers\n", cyan, reset)
+	fmt.Printf("  %sai use ollama%s              Use local Ollama\n", cyan, reset)
+	fmt.Printf("  %sai models%s                  List locally installed Ollama models\n", cyan, reset)
+	fmt.Printf("  %sai model <number|name>%s     Select a local model\n", cyan, reset)
+	fmt.Printf("  %sai ask <question>%s          Ask the active AI provider\n", cyan, reset)
+	fmt.Println()
+	fmt.Println(white + bold + " TERMINAL" + reset)
+	fmt.Printf("  %s↑ / ↓%s  command history     %s← / →%s  move cursor     %sTab%s  autocomplete\n", cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %sclear%s home                 %shelp <command>%s detailed help     %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset)
+	fmt.Println()
+	fmt.Println(dim + " Examples: run test pwd • run test 'df -h' • help run • ai --help • metrics --help" + reset)
+}
+
+func (a *App) commandHelp(cmd string) error {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	fmt.Println()
+	fmt.Printf("%s%s%s HELP%s\n", orange, bold, strings.ToUpper(cmd), reset)
+	switch cmd {
+	case "ecs", "ls":
+		fmt.Println("  List ECS resources from the current Alibaba Cloud profile/region.")
+		fmt.Println("  Shows: name, instance ID, status, type, OS, internal/external IP, billing, VPC, vSwitch, and zone.")
+		fmt.Println("\n  Usage:\n    ecs\n    ls")
+	case "use", "select":
+		fmt.Println("  Select an ECS once, then run commands without repeating its name.")
+		fmt.Println("\n  Usage:\n    use <row|ecs-name|instance-id>")
+		fmt.Println("\n  Examples:\n    use 1\n    use test\n    use i-xxxxxxxx")
+	case "run", "r":
+		fmt.Println("  Execute a shell command through Alibaba Cloud Cloud Assistant.")
+		fmt.Println("  The target can be an ECS name, table row number, or instance ID.")
+		fmt.Println("\n  Usage:\n    run <ecs-name|row|instance-id> <command>\n    run <command>                 # when an ECS is selected")
+		fmt.Println("\n  Examples:\n    run test pwd\n    run test uptime\n    run test df -h\n    use test\n    run systemctl status nginx")
+		if a.cfg.ReadOnly {
+			fmt.Println("\n  Note: RunCommand is disabled because a1s is running with --read-only.")
+		}
+	case "metrics", "m":
+		fmt.Println("  Display ECS CPU utilization for a time window.")
+		fmt.Println("\n  Usage:\n    metrics <ecs-name|row|instance-id> [minutes]\n    metrics [minutes]             # selected ECS")
+		fmt.Println("\n  Examples:\n    metrics test 60\n    use test\n    metrics 30")
+	case "quick":
+		fmt.Println("  Run the safe ECS diagnostic shortcuts: uptime, disk, memory, failed services, and listening ports.")
+		fmt.Println("\n  Usage:\n    quick\n    quick list")
+	case "uptime", "disk", "memory", "failed", "ports":
+		fmt.Printf("  Run the %q quick diagnostic on the selected ECS.\n", cmd)
+		fmt.Printf("\n  Usage:\n    use <ecs>\n    %s\n", cmd)
+	case "doctor", "d":
+		fmt.Println("  Summarize infrastructure health from ECS inventory and CPU metrics; adds AI analysis when AI is configured.")
+		fmt.Println("\n  Usage:\n    doctor\n    doctor <instance-id>")
+	case "bill", "$":
+		fmt.Println("  Show account billing for a billing cycle in settlement currency and selected display currency.")
+		fmt.Println("\n  Usage:\n    bill\n    bill YYYY-MM\n\n  Example:\n    bill 2026-08")
+	case "report":
+		fmt.Println("  Generate a Markdown report from current cloud inventory and billing data.")
+		fmt.Println("\n  Usage:\n    report [output.md]\n\n  Example:\n    report ops-report.md")
+	case "ai", "a":
+		fmt.Println("  AI namespace. Ollama is supported locally; OpenAI-compatible endpoints can be configured through environment variables.")
+		fmt.Println("\n  Usage:\n    ai providers\n    ai use ollama\n    ai models\n    ai model <number|name>\n    ai ask <question>")
+		fmt.Println("\n  Example:\n    ai use ollama\n    ai models\n    ai model 1\n    ai ask explain the health of my ECS resources")
+	case "ollama":
+		fmt.Println("  Compatibility namespace for local Ollama. Prefer the unified `ai` commands for normal use.")
+		fmt.Println("\n  Usage:\n    ollama status\n    ollama models\n    ollama start\n    ollama use <model>\n    ollama ask <question>")
+	case "currency":
+		fmt.Println("  Change display currency without changing Alibaba Cloud settlement currency.")
+		fmt.Println("\n  Usage:\n    currency USD\n    currency SAR")
+	case "clear", "home":
+		fmt.Println("  Clear the screen, redraw the header, and reload ECS inventory when cloud access is enabled.")
+		fmt.Println("\n  Usage:\n    clear\n    home")
+	case "help", "?", "--help", "-h":
+		a.fullHelp()
+	default:
+		return fmt.Errorf("no help topic for %q; use --help to list commands", cmd)
+	}
+	return nil
 }
 
 func (a *App) demoNotice() {
@@ -143,10 +240,23 @@ func (a *App) handle(ctx context.Context, line string) error {
 	cmd := strings.ToLower(parts[0])
 	rest := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
 
-	switch cmd {
-	case "help", "?":
-		a.help()
+	// Help is available globally and per command: --help, help, help run, run --help, ai --help, etc.
+	if cmd == "--help" || cmd == "-h" {
+		a.fullHelp()
 		return nil
+	}
+	if cmd == "help" || cmd == "?" {
+		if len(parts) > 1 {
+			return a.commandHelp(strings.ToLower(parts[1]))
+		}
+		a.fullHelp()
+		return nil
+	}
+	if len(parts) > 1 && (parts[1] == "--help" || parts[1] == "-h") {
+		return a.commandHelp(cmd)
+	}
+
+	switch cmd {
 	case "clear", "home":
 		a.header()
 		if a.cfg.Demo && !a.cfg.SampleData {
@@ -253,7 +363,7 @@ func (a *App) handle(ctx context.Context, line string) error {
 		fmt.Println(green + "✓ Display currency set to " + c + reset)
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q; type ? for help", cmd)
+		return fmt.Errorf("unknown command %q; use --help or help <command> (Tab autocompletes commands)", cmd)
 	}
 }
 
@@ -729,7 +839,7 @@ func (a *App) showAIModels(ctx context.Context) error {
 }
 
 func (a *App) completions(line string) []string {
-	base := []string{"ecs", "ls", "use ", "run ", "metrics ", "quick", "quick list", "uptime", "disk", "memory", "failed", "ports", "doctor", "bill", "report", "ai", "ai providers", "ai use ollama", "ai models", "ai model ", "ai ask ", "ollama status", "ollama models", "currency SAR", "currency USD", "clear", "help", "quit"}
+	base := []string{"ecs", "ls", "use ", "run ", "metrics ", "quick", "quick list", "uptime", "disk", "memory", "failed", "ports", "doctor", "bill", "report", "ai", "ai providers", "ai use ollama", "ai models", "ai model ", "ai ask ", "ollama status", "ollama models", "currency SAR", "currency USD", "clear", "help", "--help", "quit"}
 	trim := strings.TrimSpace(line)
 	out := []string{}
 	if strings.HasPrefix(trim, "run ") || strings.HasPrefix(trim, "use ") || strings.HasPrefix(trim, "metrics ") {

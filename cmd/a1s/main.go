@@ -13,7 +13,7 @@ import (
 	"a1s/internal/ui"
 )
 
-var version = "0.3.0-ui"
+var version = "0.4.0-ui"
 
 func main() {
 	cfg := config.FromEnv()
@@ -50,7 +50,9 @@ func main() {
 		fmt.Fprintln(out, "  ai use ollama                 use local Ollama")
 		fmt.Fprintln(out, "  ai models                     list installed models")
 		fmt.Fprintln(out, "  ai model <number|name>        choose model")
-		fmt.Fprintln(out, "  ↑/↓ history, ←/→ cursor, Tab autocomplete (Linux terminals)")
+		fmt.Fprintln(out, "  ↑/↓ history, ←/→ cursor, Home/End, Delete, Tab autocomplete (Linux terminals)")
+		fmt.Fprintln(out, "  --help or help             full interactive help")
+		fmt.Fprintln(out, "  <command> --help           detailed help for any interactive command")
 	}
 
 	region := flag.String("region", cfg.Region, "Alibaba Cloud region, e.g. me-central-1")

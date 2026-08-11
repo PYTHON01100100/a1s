@@ -1,47 +1,45 @@
-# a1s UI Upgrade v3
+# a1s UI Upgrade v4
 
-Drop these files into the matching paths in the a1s repository, then rebuild.
+This patch focuses on terminal usability and help correctness.
 
-## What changed
+## Fixed
 
-- `run <ecs-name> <command>` targets ECS by **instance name**, ID, or row number.
-- `use <row|name|instance-id>` supports names too.
-- ECS inventory now shows: internal/private IP, external/public IP, instance type, OS, billing/charge type, VPC ID + name, vSwitch ID + name, zone.
-- VPC/vSwitch names are resolved from Alibaba Cloud VPC APIs after `DescribeInstances`.
-- Linux interactive line editor: Up/Down command history, Left/Right cursor movement, Tab autocomplete.
-- Autocomplete suggests a1s commands and ECS names for `run`, `use`, and `metrics`.
-- AI is now grouped under `ai`:
-  - `ai providers`
-  - `ai use ollama`
-  - `ai models`
-  - `ai model <number|name>`
-  - `ai ask <question>`
-- Ollama model selection only accepts models already installed on the machine.
+- The prompt no longer contains a newline, so repainting while typing stays on one row instead of moving the cursor up/down the terminal.
+- Linux raw input keeps output post-processing enabled for cleaner Fedora/WSL terminal rendering.
+- Up/Down history preserves the unfinished draft when returning to the newest entry.
+- Left/Right cursor movement remains supported; Home, End, and Delete are also supported.
+- Tab autocomplete remains available for commands and ECS names.
 
-## Install
+## Help
+
+Inside a1s:
+
+```text
+--help
+help
+help run
+run --help
+metrics --help
+ai --help
+bill --help
+```
+
+Every main interactive command now has focused usage, examples, and a short explanation.
+
+Outside a1s:
 
 ```bash
-cp -r cmd internal /path/to/a1s/
-cd /path/to/a1s
+./bin/a1s --help
+```
+
+shows startup flags, account behavior, modes, examples, and interactive controls.
+
+## Build
+
+Copy this patch over the repository and run:
+
+```bash
 gofmt -w cmd internal
 go test ./...
 go build -o bin/a1s ./cmd/a1s
-./bin/a1s --currency SAR
 ```
-
-## Examples
-
-```text
-run test pwd
-run test uptime
-use test
-run df -h
-
-ai providers
-ai use ollama
-ai models
-ai model 1
-ai ask summarize my ECS environment
-```
-
-Alibaba Cloud permissions used for the richer inventory include `ecs:DescribeInstances`, `vpc:DescribeVpcs`, and `vpc:DescribeVSwitches` in addition to the permissions already used by a1s.
