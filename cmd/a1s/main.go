@@ -13,7 +13,7 @@ import (
 	"a1s/internal/ui"
 )
 
-var version = "0.4.0-ui"
+var version = "0.5.0-tui-chat"
 
 func main() {
 	cfg := config.FromEnv()
@@ -50,6 +50,9 @@ func main() {
 		fmt.Fprintln(out, "  ai use ollama                 use local Ollama")
 		fmt.Fprintln(out, "  ai models                     list installed models")
 		fmt.Fprintln(out, "  ai model <number|name>        choose model")
+		fmt.Fprintln(out, "  chat                          conversational AI console with /run, /ecs, /metrics")
+		fmt.Fprintln(out, "  :ecs / :chat / :run ...       k9s-style command palette")
+		fmt.Fprintln(out, "  AI auto-detection: A1S_AI_* config first, otherwise running local Ollama")
 		fmt.Fprintln(out, "  ↑/↓ history, ←/→ cursor, Home/End, Delete, Tab autocomplete (Linux terminals)")
 		fmt.Fprintln(out, "  --help or help             full interactive help")
 		fmt.Fprintln(out, "  <command> --help           detailed help for any interactive command")

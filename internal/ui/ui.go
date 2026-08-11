@@ -42,15 +42,33 @@ type App struct {
 	selectedName string
 	ollamaModel  string
 	ollamaURL    string
+	aiProvider   string
+	chatHistory  []chatTurn
 	editor       *lineEditor
 }
 
+type chatTurn struct {
+	Role    string
+	Content string
+}
+
 func New(cfg config.Config, cloud *aliyun.Client, aic *ai.Client) *App {
-	return &App{cfg: cfg, cloud: cloud, ai: aic, ollamaURL: "http://127.0.0.1:11434", editor: newLineEditor()}
+	provider := ""
+	if aic != nil && aic.Enabled() {
+		provider = "openai-compatible"
+	}
+	return &App{
+		cfg: cfg, cloud: cloud, ai: aic,
+		ollamaURL:  "http://127.0.0.1:11434",
+		aiProvider: provider,
+		editor:     newLineEditor(),
+	}
 }
 
 func (a *App) Run(ctx context.Context) error {
+	a.autoDetectAI(ctx)
 	a.header()
+	a.dashboard(ctx)
 	if a.cfg.Demo && !a.cfg.SampleData {
 		a.demoNotice()
 	} else if err := a.ecs(ctx); err != nil {
@@ -126,9 +144,9 @@ func (a *App) help() {
 	fmt.Printf("  %secs/ls%s inventory      %suse 1%s select ECS      %smetrics%s CPU       %srun <ecs> <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %squick list%s shortcuts  %sdoctor%s health         %sbill%s costs        %sreport%s markdown\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %suptime%s selected ECS   %sdisk%s filesystem       %smemory%s RAM        %sports%s listeners\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %sfailed%s services       %sai providers%s AI setup   %sai models%s       %sai ask <q>%s ask AI\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %scurrency%s USD|SAR      %sclear%s home            %shelp/?%s          %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Println(dim + "  Tip: ↑/↓ history • ←/→ cursor • Tab autocomplete • <command> --help • help <command>" + reset)
+	fmt.Printf("  %sfailed%s services       %sai providers%s AI setup   %sai models%s       %schat%s AI console\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %scurrency%s USD|SAR      %sdashboard%s home        %shelp/?%s          %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Println(dim + "  Tip: ↑/↓ history • ←/→ cursor • Tab autocomplete • :commands like k9s • chat uses /commands" + reset)
 }
 
 func (a *App) fullHelp() {
@@ -159,10 +177,12 @@ func (a *App) fullHelp() {
 	fmt.Printf("  %sai models%s                  List locally installed Ollama models\n", cyan, reset)
 	fmt.Printf("  %sai model <number|name>%s     Select a local model\n", cyan, reset)
 	fmt.Printf("  %sai ask <question>%s          Ask the active AI provider\n", cyan, reset)
+	fmt.Printf("  %schat%s                       Enter conversational AI console with /run, /ecs, /metrics and model switching\n", cyan, reset)
 	fmt.Println()
 	fmt.Println(white + bold + " TERMINAL" + reset)
 	fmt.Printf("  %s↑ / ↓%s  command history     %s← / →%s  move cursor     %sTab%s  autocomplete\n", cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %sclear%s home                 %shelp <command>%s detailed help     %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %sdashboard%s redraw home      %shelp <command>%s detailed help     %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %s:<command>%s k9s-style command palette, e.g. :ecs or :chat\n", cyan, reset)
 	fmt.Println()
 	fmt.Println(dim + " Examples: run test pwd • run test 'df -h' • help run • ai --help • metrics --help" + reset)
 }
@@ -208,9 +228,16 @@ func (a *App) commandHelp(cmd string) error {
 		fmt.Println("  Generate a Markdown report from current cloud inventory and billing data.")
 		fmt.Println("\n  Usage:\n    report [output.md]\n\n  Example:\n    report ops-report.md")
 	case "ai", "a":
-		fmt.Println("  AI namespace. Ollama is supported locally; OpenAI-compatible endpoints can be configured through environment variables.")
-		fmt.Println("\n  Usage:\n    ai providers\n    ai use ollama\n    ai models\n    ai model <number|name>\n    ai ask <question>")
-		fmt.Println("\n  Example:\n    ai use ollama\n    ai models\n    ai model 1\n    ai ask explain the health of my ECS resources")
+		fmt.Println("  Unified AI namespace with automatic provider detection. Explicit A1S_AI_* config wins; otherwise a running local Ollama is detected.")
+		fmt.Println("\n  Usage:\n    ai providers\n    ai use ollama\n    ai use openai-compatible\n    ai models\n    ai model <number|name>\n    ai ask <question>")
+		fmt.Println("\n  Example:\n    ai providers\n    ai use ollama\n    ai model 1\n    chat")
+	case "chat":
+		fmt.Println("  Enter the Hermes-inspired conversational console. Plain text goes to the active AI provider.")
+		fmt.Println("  Cloud actions stay explicit as slash commands, so the model cannot silently run commands.")
+		fmt.Println("\n  Slash commands:\n    /ecs\n    /use <ecs>\n    /run <ecs> <command>\n    /metrics [ecs] [minutes]\n    /doctor [ecs]\n    /providers\n    /models\n    /model <number|name>\n    /clear\n    /exit")
+	case "dashboard":
+		fmt.Println("  Redraw the K9s-inspired context dashboard and reload ECS inventory.")
+		fmt.Println("\n  Usage:\n    dashboard\n    :dashboard")
 	case "ollama":
 		fmt.Println("  Compatibility namespace for local Ollama. Prefer the unified `ai` commands for normal use.")
 		fmt.Println("\n  Usage:\n    ollama status\n    ollama models\n    ollama start\n    ollama use <model>\n    ollama ask <question>")
@@ -236,6 +263,10 @@ func (a *App) demoNotice() {
 }
 
 func (a *App) handle(ctx context.Context, line string) error {
+	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, ":") {
+		line = strings.TrimSpace(strings.TrimPrefix(line, ":"))
+	}
 	parts := strings.Fields(line)
 	cmd := strings.ToLower(parts[0])
 	rest := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
@@ -257,8 +288,9 @@ func (a *App) handle(ctx context.Context, line string) error {
 	}
 
 	switch cmd {
-	case "clear", "home":
+	case "clear", "home", "dashboard":
 		a.header()
+		a.dashboard(ctx)
 		if a.cfg.Demo && !a.cfg.SampleData {
 			a.demoNotice()
 			return nil
@@ -347,6 +379,8 @@ func (a *App) handle(ctx context.Context, line string) error {
 			path = parts[1]
 		}
 		return a.makeReport(ctx, path)
+	case "chat":
+		return a.chat(ctx, parts[1:])
 	case "ollama":
 		return a.handleOllama(ctx, parts[1:], strings.TrimSpace(rest))
 	case "ai", "a":
@@ -439,6 +473,7 @@ func (a *App) handleOllama(ctx context.Context, args []string, rest string) erro
 		}
 		model := args[1]
 		a.ollamaModel = model
+		a.aiProvider = "ollama"
 		a.ai.BaseURL = strings.TrimRight(a.ollamaURL, "/") + "/v1"
 		a.ai.APIKey = "ollama"
 		a.ai.Model = model
@@ -722,6 +757,10 @@ func (a *App) makeReport(ctx context.Context, path string) error {
 }
 
 func (a *App) askAI(ctx context.Context, q string) error {
+	a.autoDetectAI(ctx)
+	if a.ai == nil || !a.ai.Enabled() {
+		return fmt.Errorf("no AI provider detected; use `ai providers`, start Ollama, or configure A1S_AI_BASE_URL/A1S_AI_MODEL")
+	}
 	var xs []model.ECSInstance
 	if !(a.cfg.Demo && !a.cfg.SampleData) {
 		var err error
@@ -741,43 +780,63 @@ func (a *App) askAI(ctx context.Context, q string) error {
 
 func (a *App) handleAI(ctx context.Context, args []string, rest string) error {
 	if len(args) == 0 || strings.EqualFold(args[0], "providers") {
-		fmt.Println()
-		fmt.Println(orange + bold + " AI PROVIDERS" + reset)
-		fmt.Printf("  %sollama%s             local models on this machine\n", cyan, reset)
-		fmt.Printf("  %sopenai-compatible%s  A1S_AI_BASE_URL / vLLM / LiteLLM / DashScope-compatible endpoint\n", cyan, reset)
-		if a.ai.Enabled() {
-			fmt.Printf("  %sactive%s             %s @ %s\n", green, reset, a.ai.Model, a.ai.BaseURL)
-		} else {
-			fmt.Printf("  %sactive%s             not configured\n", yellow, reset)
-		}
-		fmt.Println(dim + "  Use: ai use ollama  →  ai models  →  ai model <number|name>  →  ai ask <question>" + reset)
-		return nil
+		return a.showAIProviders(ctx)
 	}
 	sub := strings.ToLower(args[0])
 	switch sub {
 	case "use":
 		if len(args) < 2 {
-			return fmt.Errorf("usage: ai use ollama|openai-compatible")
+			return fmt.Errorf("usage: ai use <ollama|openai-compatible>")
 		}
-		if strings.EqualFold(args[1], "ollama") {
+		switch strings.ToLower(args[1]) {
+		case "ollama":
 			models, err := a.ollamaModels(ctx)
 			if err != nil {
+				if _, lookErr := exec.LookPath("ollama"); lookErr == nil {
+					return fmt.Errorf("Ollama is installed but not running; use `ollama start`, then `ai use ollama`")
+				}
 				return fmt.Errorf("Ollama unavailable: %w", err)
 			}
+			a.aiProvider = "ollama"
 			a.ai.BaseURL = strings.TrimRight(a.ollamaURL, "/") + "/v1"
 			a.ai.APIKey = "ollama"
-			if len(models) > 0 && a.ai.Model == "" {
-				a.ai.Model = models[0]
+			if len(models) > 0 {
+				if a.ollamaModel == "" {
+					a.ollamaModel = models[0]
+				}
+				a.ai.Model = a.ollamaModel
 			}
-			fmt.Printf("%s✓ AI provider: Ollama%s\n", green, reset)
+			fmt.Printf("%s✓ AI provider:%s Ollama", green, reset)
+			if a.ai.Model != "" {
+				fmt.Printf(" • %s%s%s", orange, a.ai.Model, reset)
+			}
+			fmt.Println()
+			return a.showAIModels(ctx)
+		case "openai-compatible", "env":
+			if strings.TrimSpace(a.cfg.AIBaseURL) == "" || strings.TrimSpace(a.cfg.AIModel) == "" {
+				return fmt.Errorf("no OpenAI-compatible provider configured; set A1S_AI_BASE_URL and A1S_AI_MODEL")
+			}
+			a.aiProvider = "openai-compatible"
+			a.ai.BaseURL = strings.TrimRight(a.cfg.AIBaseURL, "/")
+			a.ai.APIKey = a.cfg.AIAPIKey
+			a.ai.Model = a.cfg.AIModel
+			fmt.Printf("%s✓ AI provider:%s openai-compatible • %s\n", green, reset, a.ai.Model)
+			return nil
+		default:
+			return fmt.Errorf("unknown provider %q; use `ai providers`", args[1])
+		}
+	case "models":
+		if a.aiProvider == "ollama" || a.aiProvider == "" {
 			return a.showAIModels(ctx)
 		}
-		return fmt.Errorf("openai-compatible uses A1S_AI_BASE_URL, A1S_AI_MODEL and optional A1S_AI_API_KEY at startup")
-	case "models":
-		return a.showAIModels(ctx)
+		fmt.Printf("%sactive model%s  %s\n", gray, reset, blank(a.ai.Model, "(not configured)"))
+		return nil
 	case "model":
 		if len(args) < 2 {
 			return fmt.Errorf("usage: ai model <number|name>")
+		}
+		if a.aiProvider != "ollama" {
+			return fmt.Errorf("interactive model discovery is currently available for Ollama; use `ai use ollama` first")
 		}
 		models, err := a.ollamaModels(ctx)
 		if err != nil {
@@ -804,6 +863,7 @@ func (a *App) handleAI(ctx context.Context, args []string, rest string) error {
 		a.ai.APIKey = "ollama"
 		a.ai.Model = choice
 		a.ollamaModel = choice
+		a.aiProvider = "ollama"
 		fmt.Printf("%s✓ AI model:%s %s%s%s\n", green, reset, orange, choice, reset)
 		return nil
 	case "ask":
@@ -812,7 +872,10 @@ func (a *App) handleAI(ctx context.Context, args []string, rest string) error {
 			return fmt.Errorf("usage: ai ask <question>")
 		}
 		return a.askAI(ctx, q)
+	case "status":
+		return a.showAIProviders(ctx)
 	default:
+		// `ai why is CPU high?` is a shortcut for `ai ask ...`.
 		return a.askAI(ctx, rest)
 	}
 }
@@ -839,17 +902,31 @@ func (a *App) showAIModels(ctx context.Context) error {
 }
 
 func (a *App) completions(line string) []string {
-	base := []string{"ecs", "ls", "use ", "run ", "metrics ", "quick", "quick list", "uptime", "disk", "memory", "failed", "ports", "doctor", "bill", "report", "ai", "ai providers", "ai use ollama", "ai models", "ai model ", "ai ask ", "ollama status", "ollama models", "currency SAR", "currency USD", "clear", "help", "--help", "quit"}
+	base := []string{
+		"ecs", "ls", "use ", "run ", "metrics ", "quick", "quick list",
+		"uptime", "disk", "memory", "failed", "ports", "doctor", "bill", "report",
+		"ai", "ai providers", "ai use ollama", "ai use openai-compatible", "ai models", "ai model ", "ai ask ",
+		"chat", "dashboard", "ollama status", "ollama models", "currency SAR", "currency USD",
+		"clear", "help", "--help", "quit",
+		":ecs", ":run ", ":metrics ", ":bill", ":chat", ":dashboard", ":help",
+	}
 	trim := strings.TrimSpace(line)
 	out := []string{}
-	if strings.HasPrefix(trim, "run ") || strings.HasPrefix(trim, "use ") || strings.HasPrefix(trim, "metrics ") {
-		parts := strings.Fields(line)
-		if len(parts) <= 2 {
+	palette := strings.HasPrefix(trim, ":")
+	matchTrim := strings.TrimPrefix(trim, ":")
+
+	if strings.HasPrefix(matchTrim, "run ") || strings.HasPrefix(matchTrim, "use ") || strings.HasPrefix(matchTrim, "metrics ") {
+		work := strings.TrimPrefix(strings.TrimSpace(line), ":")
+		parts := strings.Fields(work)
+		if len(parts) <= 2 && len(parts) > 0 {
 			prefix := ""
 			if len(parts) > 1 {
 				prefix = parts[1]
 			}
 			cmd := parts[0] + " "
+			if palette {
+				cmd = ":" + cmd
+			}
 			for _, x := range a.instances {
 				if strings.HasPrefix(strings.ToLower(x.Name), strings.ToLower(prefix)) {
 					suffix := ""
