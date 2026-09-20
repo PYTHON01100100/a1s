@@ -18,9 +18,14 @@ type ECSInstance struct {
 	ExpiredTime string
 	VPCID       string
 	VPCName     string
+	VPCCIDR     string
 	VSwitchID   string
 	VSwitchName string
-	CPUPercent  float64
+	VSwitchCIDR string
+	// ENIID is the primary Elastic Network Interface ID attached to the
+	// instance's primary network card.
+	ENIID      string
+	CPUPercent float64
 }
 
 type MetricPoint struct {

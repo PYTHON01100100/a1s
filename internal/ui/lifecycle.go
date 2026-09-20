@@ -311,6 +311,43 @@ func (a *App) confirm(msg string) bool {
 
 // filterInstances narrows an ECS list either by a `key=value` match against
 // one field, or by a plain substring match across name/id/status/type/zone.
+// query is a cross-field lookup over the currently loaded ECS inventory: an
+// IP, VPC/vSwitch ID, CIDR, or ENI ID in, a full network/billing "card" for
+// every matching instance out. It reuses filterInstances' matcher (plain
+// substring or key=value) but never narrows a.instances the way `filter`
+// does — it's read-only and doesn't affect what `ecs`/`use <row>` show.
+func (a *App) query(term string) error {
+	if len(a.instances) == 0 {
+		return fmt.Errorf("no ECS inventory loaded; run `ecs` first")
+	}
+	matches := filterInstances(a.instances, term)
+	fmt.Println()
+	if len(matches) == 0 {
+		fmt.Printf(" %sNo matches for%s %q\n", yellow, reset, term)
+		fmt.Println(dim + "  Try: query <ip>  •  query vpc=<id>  •  query vswitch=<id>  •  query cidr=<block>  •  query eni=<id>" + reset)
+		return nil
+	}
+	fmt.Printf(" %s%sQUERY%s  %s%q%s  %s%d match(es)%s\n", orange, bold, reset, orange, term, reset, dim, len(matches), reset)
+	for _, x := range matches {
+		fmt.Println(dim + " ─────────────────────────────────────────────────────────────────────" + reset)
+		marker := " "
+		if x.ID == a.selectedID {
+			marker = "›"
+		}
+		kindText, kindColor := instanceKind(x.Type)
+		fmt.Printf(" %s%s%s%s%s  %s%s%s  %s%s%s\n", orange, marker, bold, blank(x.Name, x.ID), reset, dim, x.ID, reset, kindColor, kindText, reset)
+		fmt.Printf("   %sstatus%s    %-10s  %stype%s      %s\n", gray, reset, x.Status, gray, reset, x.Type)
+		fmt.Printf("   %sinternal%s  %-15s %sexternal%s  %s\n", gray, reset, blank(x.PrivateIP, "-"), gray, reset, blank(x.PublicIP, "-"))
+		fmt.Printf("   %svpc%s       %s\n", gray, reset, pairLabelCIDR(x.VPCName, x.VPCID, x.VPCCIDR))
+		fmt.Printf("   %svswitch%s   %s\n", gray, reset, pairLabelCIDR(x.VSwitchName, x.VSwitchID, x.VSwitchCIDR))
+		fmt.Printf("   %szone%s      %s\n", gray, reset, zoneLabel(x.Zone))
+		fmt.Printf("   %seni%s       %s\n", gray, reset, blank(x.ENIID, "-"))
+		expireText, expireColor := billingExpiry(x)
+		fmt.Printf("   %sbilling%s   %-14s %sexpires%s   %s%s%s\n", gray, reset, billingLabel(x.ChargeType), gray, reset, expireColor, expireText, reset)
+	}
+	return nil
+}
+
 func filterInstances(xs []model.ECSInstance, q string) []model.ECSInstance {
 	q = strings.TrimSpace(q)
 	if q == "" {
@@ -327,12 +364,38 @@ func filterInstances(xs []model.ECSInstance, q string) []model.ECSInstance {
 				field = x.Status
 			case "type":
 				field = x.Type
+			case "compute", "kind":
+				field, _ = instanceKind(x.Type)
 			case "zone":
 				field = x.Zone
+			case "region":
+				field = regionFromZone(x.Zone)
 			case "name":
 				field = x.Name
-			case "id":
+			case "id", "instance", "instanceid":
 				field = x.ID
+			case "ip":
+				field = strings.Join([]string{x.PrivateIP, x.PublicIP}, " ")
+			case "internalip", "privateip":
+				field = x.PrivateIP
+			case "externalip", "publicip":
+				field = x.PublicIP
+			case "vpc", "vpcid":
+				field = x.VPCID
+			case "vpcname":
+				field = x.VPCName
+			case "vswitch", "vswitchid", "vsw":
+				field = x.VSwitchID
+			case "vswitchname":
+				field = x.VSwitchName
+			case "cidr":
+				field = strings.Join([]string{x.VPCCIDR, x.VSwitchCIDR}, " ")
+			case "vpccidr":
+				field = x.VPCCIDR
+			case "vswitchcidr":
+				field = x.VSwitchCIDR
+			case "eni", "eniid":
+				field = x.ENIID
 			case "charge", "chargetype", "billing":
 				field = x.ChargeType
 			}
@@ -345,7 +408,10 @@ func filterInstances(xs []model.ECSInstance, q string) []model.ECSInstance {
 	ql := strings.ToLower(q)
 	out := make([]model.ECSInstance, 0, len(xs))
 	for _, x := range xs {
-		hay := strings.ToLower(strings.Join([]string{x.Name, x.ID, x.Status, x.Type, x.Zone, x.ChargeType, x.PublicIP, x.PrivateIP}, " "))
+		hay := strings.ToLower(strings.Join([]string{
+			x.Name, x.ID, x.Status, x.Type, x.Zone, x.ChargeType, x.PublicIP, x.PrivateIP,
+			x.VPCID, x.VPCName, x.VPCCIDR, x.VSwitchID, x.VSwitchName, x.VSwitchCIDR, x.ENIID,
+		}, " "))
 		if strings.Contains(hay, ql) {
 			out = append(out, x)
 		}

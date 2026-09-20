@@ -136,7 +136,8 @@ func (a *App) help() {
 	fmt.Println()
 	fmt.Println(orange + bold + " QUICK COMMANDS" + reset)
 	fmt.Printf("  %secs/ls%s inventory      %suse 1%s select ECS      %sstart/stop/reboot%s lifecycle   %sterminate%s delete\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %sstop eco%s eco stop     %sfilter%s search          %swatch [s]%s live refresh    %srun <ecs> <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %sstop eco%s eco stop     %sfilter%s search          %squery%s lookup            %srun <ecs> <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %swatch [s]%s live refresh %sregions%s pick a region\n", cyan, reset, cyan, reset)
 	fmt.Printf("  %squick list%s shortcuts  %sdoctor%s health          %sbill%s costs             %sreport%s markdown\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %sconfigure%s add/switch keys %sprofile/region%s switch  %stheme%s alibaba|mono   %scurrency%s USD|SAR\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %shelp/?%s full help      %sq%s quit\n", cyan, reset, cyan, reset)
@@ -153,6 +154,7 @@ func (a *App) fullHelp() {
 	fmt.Printf("  %suse <row|name|id>%s          Select an ECS for following commands\n", cyan, reset)
 	fmt.Printf("  %sfilter <query>%s             Narrow the list, e.g. filter status=running, filter web\n", cyan, reset)
 	fmt.Printf("  %sfilter clear%s               Remove the active filter\n", cyan, reset)
+	fmt.Printf("  %squery <text|key=value>%s     Look up instances by IP/VPC/vSwitch/CIDR/ENI without narrowing the table\n", cyan, reset)
 	fmt.Printf("  %swatch [seconds]%s            Live auto-refreshing ECS view (default 5s, Ctrl+C to stop)\n", cyan, reset)
 	fmt.Printf("  %smetrics [target] [minutes]%s Show CPU metrics (default 60 minutes)\n", cyan, reset)
 	fmt.Println()
@@ -253,8 +255,17 @@ func (a *App) commandHelp(cmd string) error {
 		fmt.Println("\n  Usage:\n    terminate [target]\n    terminate [target] --force\n\n  Example:\n    terminate web-02")
 	case "filter", "find":
 		fmt.Println("  Narrow the ECS list and working set to matching instances.")
-		fmt.Println("  Plain text matches name, ID, status, type, zone, billing, and IPs. key=value matches one field.")
+		fmt.Println("  Plain text matches name, ID, status, type, zone, billing, IPs, VPC/vSwitch, CIDR, and ENI.")
+		fmt.Println("  key=value matches one field: status, type, compute, zone, region, name, id, ip, internalip,")
+		fmt.Println("  externalip, vpc, vpcname, vswitch, vswitchname, cidr, vpccidr, vswitchcidr, eni, billing.")
 		fmt.Println("\n  Usage:\n    filter <text>\n    filter status=running\n    filter zone=me-central-1a\n    filter clear")
+		fmt.Println(dim + "  Looking something up without narrowing the table? Use `query` instead." + reset)
+	case "query":
+		fmt.Println("  Look up ECS instances by any field without narrowing the table (unlike `filter`).")
+		fmt.Println("  Prints a full network/billing card per match: IP, VPC/vSwitch (with CIDR), zone, ENI, billing.")
+		fmt.Println("  Accepts the same plain-text or key=value syntax as `filter`.")
+		fmt.Println("\n  Usage:\n    query <text>\n    query <key>=<value>")
+		fmt.Println("\n  Examples:\n    query 10.0.0.11          # which instance has this IP\n    query vpc=vpc-demo01     # every instance in this VPC\n    query vswitch=vsw-demo01\n    query cidr=10.0.0.0/24\n    query eni=eni-demo-web01")
 	case "watch", "w":
 		fmt.Println("  Auto-refresh the ECS inventory at a fixed interval, like a live dashboard.")
 		fmt.Println("\n  Usage:\n    watch\n    watch <seconds>\n\n  Example:\n    watch 10\n\n  Stop with Ctrl+C.")
@@ -432,6 +443,14 @@ func (a *App) handle(ctx context.Context, line string) error {
 		}
 		a.filter = rest
 		return a.ecs(ctx)
+	case "query":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
+		if rest == "" {
+			return fmt.Errorf("usage: query <text|key=value>  e.g. query 10.0.0.11, query vpc=vpc-demo01, query eni-demo-web01")
+		}
+		return a.query(rest)
 	case "watch", "w":
 		if err := a.requireCloudData(); err != nil {
 			return err
@@ -646,7 +665,7 @@ func (a *App) ecs(ctx context.Context) error {
 	} else {
 		fmt.Printf(" %s%sECS INSTANCES%s  %s%d resources%s\n", orange, bold, reset, dim, len(xs), reset)
 	}
-	header := fmt.Sprintf(" %-3s %-16s %-20s %-9s %-22s %-7s %-24s %-15s %-15s %-26s %-28s %-30s %-14s %-24s",
+	header := fmt.Sprintf(" %-3s %-16s %-20s %-9s %-22s %-7s %-24s %-15s %-15s %-36s %-40s %-30s %-14s %-24s",
 		"#", "NAME", "INSTANCE ID", "STATUS", "TYPE", "COMPUTE", "OS", "INTERNAL IP", "EXTERNAL IP", "VPC", "VSWITCH", "ZONE (REGION)", "BILLING", "EXPIRES")
 	rule := dim + " " + strings.Repeat("─", len(header)-1) + reset
 	fmt.Println(rule)
@@ -664,7 +683,7 @@ func (a *App) ecs(ctx context.Context) error {
 		}
 		expireText, expireColor := billingExpiry(x)
 		kindText, kindColor := instanceKind(x.Type)
-		fmt.Printf(" %s%s%-3d%s %-16s %s%-20s%s %s%-9s%s %-22s %s %-24s %-15s %-15s %-26s %-28s %-30s %s %s\n",
+		fmt.Printf(" %s%s%-3d%s %-16s %s%-20s%s %s%-9s%s %-22s %s %-24s %-15s %-15s %-36s %-40s %-30s %s %s\n",
 			orange, marker, i+1, reset,
 			clip(blank(x.Name, "-"), 16),
 			dim, clip(x.ID, 20), reset,
@@ -674,8 +693,8 @@ func (a *App) ecs(ctx context.Context) error {
 			clip(blank(x.OSName, x.OSType), 24),
 			clip(blank(x.PrivateIP, "-"), 15),
 			clip(blank(x.PublicIP, "-"), 15),
-			clip(pairLabel(x.VPCName, x.VPCID), 26),
-			clip(pairLabel(x.VSwitchName, x.VSwitchID), 28),
+			clip(pairLabelCIDR(x.VPCName, x.VPCID, x.VPCCIDR), 36),
+			clip(pairLabelCIDR(x.VSwitchName, x.VSwitchID, x.VSwitchCIDR), 40),
 			clip(zoneLabel(x.Zone), 30),
 			padPlain(billingLabel(x.ChargeType), 14),
 			padColor(expireText, expireColor, 24))
@@ -766,6 +785,16 @@ func pairLabel(name, id string) string {
 		return n
 	}
 	return fmt.Sprintf("%s (%s)", n, id)
+}
+
+// pairLabelCIDR is pairLabel with the resource's CIDR block appended, e.g.
+// "demo-vpc (vpc-demo01) 10.0.0.0/16".
+func pairLabelCIDR(name, id, cidr string) string {
+	base := pairLabel(name, id)
+	if cidr == "" {
+		return base
+	}
+	return base + " " + cidr
 }
 
 // zoneLabel shows a zone alongside its region, e.g. "me-central-1a
@@ -921,7 +950,7 @@ func (a *App) completions(line string) []string {
 		"ecs", "ls", "use ", "run ", "metrics ", "quick", "quick list",
 		"uptime", "disk", "memory", "failed", "ports", "doctor", "bill", "report",
 		"start ", "stop ", "stop eco ", "reboot ", "terminate ", "delete ",
-		"filter ", "filter clear", "find ", "watch", "watch ",
+		"filter ", "filter clear", "find ", "query ", "watch", "watch ",
 		"profiles", "profile ", "region ", "regions", "configure", "configure ", "keys", "theme", "theme alibaba", "theme mono",
 		"dashboard", "currency SAR", "currency USD",
 		"clear", "help", "--help", "quit",
