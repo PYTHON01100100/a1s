@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"a1s/internal/currency"
-	"a1s/internal/model"
+	"github.com/PYTHON01100100/a1s/internal/currency"
+	"github.com/PYTHON01100100/a1s/internal/model"
 )
 
 func Doctor(instances []model.ECSInstance, points []model.MetricPoint) string {

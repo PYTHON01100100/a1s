@@ -8,18 +8,23 @@ Core loop:
 
 1. Discover resources.
 2. Observe current state and metrics.
-3. Inspect logs/events.
+3. Manage lifecycle (start/stop/reboot/terminate) with explicit confirmation
+   for anything destructive.
 4. Run safe diagnostics when explicitly requested.
-5. Feed collected evidence to AI.
-6. Produce concise operational or FinOps reports.
+5. Produce concise operational or FinOps reports.
+
+An AI copilot (natural-language questions over collected evidence, a chat
+console) is intentionally deferred to a later release. The current focus is
+making direct instance management fast, predictable, and safe without it.
 
 ## Safety model
 
-- `--read-only` must disable all mutating actions.
-- AI never auto-runs commands.
-- Command output is evidence; AI text is interpretation.
-- Destructive actions should require a confirmation layer in future versions.
+- `--read-only` disables all mutating actions (start/stop/reboot/terminate/run).
+- `terminate` always asks for interactive confirmation.
+- Command output is evidence; nothing is inferred beyond what a command returned.
 - Prefer RAM least privilege and temporary credentials/roles.
+- When AI returns, it must never auto-run commands or claim a command ran
+  without real output backing it.
 
 ## Future GUI/TUI tabs
 

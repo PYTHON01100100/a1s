@@ -3,7 +3,6 @@
 package ui
 
 import (
-	"bufio"
 	"fmt"
 	"os"
 	"sort"
@@ -22,10 +21,26 @@ func newLineEditor() *lineEditor { return &lineEditor{maxHist: 200} }
 func (e *lineEditor) ReadLine(prompt string, candidates func(string) []string) (string, error) {
 	fd := int(os.Stdin.Fd())
 	if !isTerminal(fd) {
+		// Read one byte at a time, with no read-ahead buffering. A buffered
+		// reader can pull more than one line out of the pipe in a single
+		// syscall; those extra bytes then sit in Go-level memory and are
+		// lost to any child process a1s later hands stdin to (e.g. `aliyun
+		// configure`), which would see EOF instead of the remaining input.
 		fmt.Print(prompt)
-		r := bufio.NewReader(os.Stdin)
-		line, err := r.ReadString('\n')
-		return strings.TrimSpace(line), err
+		var sb strings.Builder
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				if buf[0] == '\n' {
+					return strings.TrimSpace(sb.String()), nil
+				}
+				sb.WriteByte(buf[0])
+			}
+			if err != nil {
+				return strings.TrimSpace(sb.String()), err
+			}
+		}
 	}
 
 	old, err := makeRaw(fd)

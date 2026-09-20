@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,11 +17,30 @@ type Config struct {
 	ReadOnly     bool
 	Demo         bool
 	SampleData   bool
-	AIBaseURL    string
-	AIAPIKey     string
-	AIModel      string
 	AliyunConfig string
 	ConfigSource string
+}
+
+// Profile is one named aliyun-cli credential profile as recorded in
+// ~/.aliyun/config.json.
+type Profile struct {
+	Name     string
+	RegionID string
+}
+
+// ListProfiles reads the aliyun-cli configuration from disk so the UI can
+// offer multi-profile/region switching without a1s managing credentials
+// itself.
+func ListProfiles() ([]Profile, string, error) {
+	c, path, ok := detectAliyunCLIConfig()
+	if !ok {
+		return nil, "", errors.New("no aliyun-cli configuration found; run `aliyun configure` first")
+	}
+	profiles := make([]Profile, 0, len(c.Profiles))
+	for _, p := range c.Profiles {
+		profiles = append(profiles, Profile{Name: p.Name, RegionID: strings.TrimSpace(p.RegionID)})
+	}
+	return profiles, path, nil
 }
 
 type aliyunDiskConfig struct {
@@ -70,9 +90,6 @@ func FromEnv() Config {
 		Profile:      profile,
 		Currency:     currency,
 		SARPerUSD:    fx,
-		AIBaseURL:    os.Getenv("A1S_AI_BASE_URL"),
-		AIAPIKey:     os.Getenv("A1S_AI_API_KEY"),
-		AIModel:      os.Getenv("A1S_AI_MODEL"),
 		AliyunConfig: path,
 		ConfigSource: source,
 	}

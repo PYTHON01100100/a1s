@@ -7,13 +7,12 @@ import (
 	"os"
 	"strings"
 
-	"a1s/internal/ai"
-	"a1s/internal/aliyun"
-	"a1s/internal/config"
-	"a1s/internal/ui"
+	"github.com/PYTHON01100100/a1s/internal/aliyun"
+	"github.com/PYTHON01100100/a1s/internal/config"
+	"github.com/PYTHON01100100/a1s/internal/ui"
 )
 
-var version = "0.5.0-tui-chat"
+var version = "0.6.0"
 
 func main() {
 	cfg := config.FromEnv()
@@ -23,36 +22,34 @@ func main() {
 		fmt.Fprintln(out, "a1s — Alibaba Cloud terminal operations")
 		fmt.Fprintln(out, "")
 		fmt.Fprintln(out, "USAGE")
-		fmt.Fprintln(out, "  a1s [options]")
+		fmt.Fprintln(out, "  a1s")
 		fmt.Fprintln(out, "")
 		fmt.Fprintln(out, "ACCOUNT")
-		fmt.Fprintln(out, "  By default a1s auto-detects the current aliyun-cli profile and region.")
-		fmt.Fprintln(out, "  Run without --demo to see ONLY resources returned by your Alibaba Cloud account.")
+		fmt.Fprintln(out, "  a1s auto-detects the current aliyun-cli profile and region and shows only")
+		fmt.Fprintln(out, "  what your Alibaba Cloud account returns. If no account is configured yet,")
+		fmt.Fprintln(out, "  a1s starts anyway and shows how to fix it (or run `configure` inside a1s).")
 		fmt.Fprintln(out, "")
 		fmt.Fprintln(out, "OPTIONS")
 		flag.PrintDefaults()
 		fmt.Fprintln(out, "")
-		fmt.Fprintln(out, "MODES")
-		fmt.Fprintln(out, "  --demo          UI-only mode. No cloud calls and NO fake resources.")
-		fmt.Fprintln(out, "  --sample-data   Explicit local sample resources for screenshots/testing.")
-		fmt.Fprintln(out, "")
-		fmt.Fprintln(out, "EXAMPLES")
-		fmt.Fprintln(out, "  a1s --currency SAR")
-		fmt.Fprintln(out, "  a1s --read-only --currency SAR")
-		fmt.Fprintln(out, "  a1s --demo")
-		fmt.Fprintln(out, "  a1s --sample-data --currency SAR")
-		fmt.Fprintln(out, "  a1s --version")
+		fmt.Fprintln(out, "OTHER MODES")
+		fmt.Fprintln(out, "  --demo          UI-only mode. No cloud calls and no data shown.")
+		fmt.Fprintln(out, "  --sample-data   Local fake instances for trying a1s without a real account.")
 		fmt.Fprintln(out, "")
 		fmt.Fprintln(out, "INTERACTIVE")
-		fmt.Fprintln(out, "  run <ecs-name> <command>      target ECS by name")
+		fmt.Fprintln(out, "  ecs                           list ECS inventory")
 		fmt.Fprintln(out, "  use <row|name|instance-id>    select ECS")
-		fmt.Fprintln(out, "  ai providers                  list AI providers")
-		fmt.Fprintln(out, "  ai use ollama                 use local Ollama")
-		fmt.Fprintln(out, "  ai models                     list installed models")
-		fmt.Fprintln(out, "  ai model <number|name>        choose model")
-		fmt.Fprintln(out, "  chat                          conversational AI console with /run, /ecs, /metrics")
-		fmt.Fprintln(out, "  :ecs / :chat / :run ...       k9s-style command palette")
-		fmt.Fprintln(out, "  AI auto-detection: A1S_AI_* config first, otherwise running local Ollama")
+		fmt.Fprintln(out, "  start / stop / reboot         instance lifecycle for the selected ECS")
+		fmt.Fprintln(out, "  stop eco <target>             stop and pause vCPU/memory billing")
+		fmt.Fprintln(out, "  terminate <target>            delete an instance (confirmation required)")
+		fmt.Fprintln(out, "  filter <query>                narrow the ECS list, e.g. filter status=running")
+		fmt.Fprintln(out, "  watch [seconds]                live auto-refreshing ECS view")
+		fmt.Fprintln(out, "  run <ecs-name> <command>      target ECS by name")
+		fmt.Fprintln(out, "  profile <name> / region <id>  switch aliyun-cli profile or region")
+		fmt.Fprintln(out, "  configure [profile]           add/update AccessKey ID, Secret, and region")
+		fmt.Fprintln(out, "  currency USD|SAR              change the display currency")
+		fmt.Fprintln(out, "  theme <alibaba|mono>          switch the color theme")
+		fmt.Fprintln(out, "  :ecs / :run / :bill ...       k9s-style command palette")
 		fmt.Fprintln(out, "  ↑/↓ history, ←/→ cursor, Home/End, Delete, Tab autocomplete (Linux terminals)")
 		fmt.Fprintln(out, "  --help or help             full interactive help")
 		fmt.Fprintln(out, "  <command> --help           detailed help for any interactive command")
@@ -85,16 +82,11 @@ func main() {
 		os.Exit(2)
 	}
 
+	// Account/CLI availability is checked inside the app so a missing or
+	// unconfigured aliyun CLI shows a helpful in-app notice (with a `configure`
+	// command to fix it live) instead of a hard exit before the UI even renders.
 	cloud := aliyun.New(cfg, nil)
-	if !cfg.Demo {
-		if err := cloud.CheckCLI(context.Background()); err != nil {
-			fmt.Fprintln(os.Stderr, "aliyun CLI check failed:", err)
-			fmt.Fprintln(os.Stderr, "Install/configure aliyun CLI, or use `a1s --demo` for UI-only mode.")
-			os.Exit(1)
-		}
-	}
-
-	app := ui.New(cfg, cloud, ai.New(cfg))
+	app := ui.New(cfg, cloud)
 	if err := app.Run(context.Background()); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

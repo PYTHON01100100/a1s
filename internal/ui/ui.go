@@ -2,24 +2,23 @@ package ui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"a1s/internal/ai"
-	"a1s/internal/aliyun"
-	"a1s/internal/config"
-	"a1s/internal/currency"
-	"a1s/internal/model"
-	"a1s/internal/report"
+	"github.com/PYTHON01100100/a1s/internal/aliyun"
+	"github.com/PYTHON01100100/a1s/internal/config"
+	"github.com/PYTHON01100100/a1s/internal/currency"
+	"github.com/PYTHON01100100/a1s/internal/model"
+	"github.com/PYTHON01100100/a1s/internal/report"
 )
 
-const (
+// Alibaba Cloud brand orange is the default, professional theme. Status
+// colors (green/yellow/red) stay constant across themes so meaning never
+// changes; only decorative accent colors are swappable via setTheme.
+var (
 	reset   = "\x1b[0m"
 	bold    = "\x1b[1m"
 	dim     = "\x1b[2m"
@@ -31,48 +30,42 @@ const (
 	red     = "\x1b[38;2;255;92;92m"
 	gray    = "\x1b[38;2;150;158;168m"
 	white   = "\x1b[38;2;235;238;242m"
+
+	themeName = "alibaba"
 )
 
 type App struct {
 	cfg          config.Config
 	cloud        *aliyun.Client
-	ai           *ai.Client
 	instances    []model.ECSInstance
 	selectedID   string
 	selectedName string
-	ollamaModel  string
-	ollamaURL    string
-	aiProvider   string
-	chatHistory  []chatTurn
+	filter       string
 	editor       *lineEditor
+	cloudReady   bool
+	accountErr   error
 }
 
-type chatTurn struct {
-	Role    string
-	Content string
-}
-
-func New(cfg config.Config, cloud *aliyun.Client, aic *ai.Client) *App {
-	provider := ""
-	if aic != nil && aic.Enabled() {
-		provider = "openai-compatible"
-	}
+func New(cfg config.Config, cloud *aliyun.Client) *App {
 	return &App{
-		cfg: cfg, cloud: cloud, ai: aic,
-		ollamaURL:  "http://127.0.0.1:11434",
-		aiProvider: provider,
-		editor:     newLineEditor(),
+		cfg:    cfg,
+		cloud:  cloud,
+		editor: newLineEditor(),
 	}
 }
 
 func (a *App) Run(ctx context.Context) error {
-	a.autoDetectAI(ctx)
 	a.header()
 	a.dashboard(ctx)
-	if a.cfg.Demo && !a.cfg.SampleData {
+	switch {
+	case a.cfg.Demo && !a.cfg.SampleData:
 		a.demoNotice()
-	} else if err := a.ecs(ctx); err != nil {
-		fmt.Println(yellow + "⚠ Could not load ECS inventory: " + reset + err.Error())
+	case !a.checkAccount(ctx):
+		a.accountNotice()
+	default:
+		if err := a.ecs(ctx); err != nil {
+			fmt.Println(yellow + "⚠ Could not load ECS inventory: " + reset + err.Error())
+		}
 	}
 	a.help()
 
@@ -141,12 +134,12 @@ func (a *App) promptText() string {
 func (a *App) help() {
 	fmt.Println()
 	fmt.Println(orange + bold + " QUICK COMMANDS" + reset)
-	fmt.Printf("  %secs/ls%s inventory      %suse 1%s select ECS      %smetrics%s CPU       %srun <ecs> <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %squick list%s shortcuts  %sdoctor%s health         %sbill%s costs        %sreport%s markdown\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %suptime%s selected ECS   %sdisk%s filesystem       %smemory%s RAM        %sports%s listeners\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %sfailed%s services       %sai providers%s AI setup   %sai models%s       %schat%s AI console\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %scurrency%s USD|SAR      %sdashboard%s home        %shelp/?%s          %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
-	fmt.Println(dim + "  Tip: ↑/↓ history • ←/→ cursor • Tab autocomplete • :commands like k9s • chat uses /commands" + reset)
+	fmt.Printf("  %secs/ls%s inventory      %suse 1%s select ECS      %sstart/stop/reboot%s lifecycle   %sterminate%s delete\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %sstop eco%s eco stop     %sfilter%s search          %swatch [s]%s live refresh    %srun <ecs> <cmd>%s execute\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %squick list%s shortcuts  %sdoctor%s health          %sbill%s costs             %sreport%s markdown\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %sconfigure%s add/switch keys %sprofile/region%s switch  %stheme%s alibaba|mono   %scurrency%s USD|SAR\n", cyan, reset, cyan, reset, cyan, reset, cyan, reset)
+	fmt.Printf("  %shelp/?%s full help      %sq%s quit\n", cyan, reset, cyan, reset)
+	fmt.Println(dim + "  Tip: ↑/↓ history • ←/→ cursor • Tab autocomplete • :commands like k9s" + reset)
 }
 
 func (a *App) fullHelp() {
@@ -157,7 +150,18 @@ func (a *App) fullHelp() {
 	fmt.Println(white + bold + " RESOURCE BROWSING" + reset)
 	fmt.Printf("  %secs%s, %sls%s                    List ECS inventory and network details\n", cyan, reset, cyan, reset)
 	fmt.Printf("  %suse <row|name|id>%s          Select an ECS for following commands\n", cyan, reset)
+	fmt.Printf("  %sfilter <query>%s             Narrow the list, e.g. filter status=running, filter web\n", cyan, reset)
+	fmt.Printf("  %sfilter clear%s               Remove the active filter\n", cyan, reset)
+	fmt.Printf("  %swatch [seconds]%s            Live auto-refreshing ECS view (default 5s, Ctrl+C to stop)\n", cyan, reset)
 	fmt.Printf("  %smetrics [target] [minutes]%s Show CPU metrics (default 60 minutes)\n", cyan, reset)
+	fmt.Println()
+	fmt.Println(white + bold + " INSTANCE LIFECYCLE" + reset)
+	fmt.Printf("  %sstart [target]%s             Start a stopped instance\n", cyan, reset)
+	fmt.Printf("  %sstop [target]%s              Stop normally (keeps the instance billed and ready)\n", cyan, reset)
+	fmt.Printf("  %sstop eco [target]%s          Economic stop; pauses vCPU/memory billing while stopped\n", cyan, reset)
+	fmt.Printf("  %sreboot [target]%s            Reboot; add --force for a hard reboot\n", cyan, reset)
+	fmt.Printf("  %sterminate [target]%s         Delete an instance permanently (asks for confirmation)\n", cyan, reset)
+	fmt.Println(dim + "  target is a row number, ECS name, or instance ID; omit it to use the selected ECS." + reset)
 	fmt.Println()
 	fmt.Println(white + bold + " REMOTE EXECUTION" + reset)
 	fmt.Printf("  %srun <ecs-name> <command>%s   Execute on an ECS by name, row, or instance ID\n", cyan, reset)
@@ -171,20 +175,21 @@ func (a *App) fullHelp() {
 	fmt.Printf("  %sreport [file.md]%s           Write a Markdown operations report\n", cyan, reset)
 	fmt.Printf("  %scurrency USD|SAR%s           Change display currency\n", cyan, reset)
 	fmt.Println()
-	fmt.Println(white + bold + " AI" + reset)
-	fmt.Printf("  %sai providers%s               Show supported/configured providers\n", cyan, reset)
-	fmt.Printf("  %sai use ollama%s              Use local Ollama\n", cyan, reset)
-	fmt.Printf("  %sai models%s                  List locally installed Ollama models\n", cyan, reset)
-	fmt.Printf("  %sai model <number|name>%s     Select a local model\n", cyan, reset)
-	fmt.Printf("  %sai ask <question>%s          Ask the active AI provider\n", cyan, reset)
-	fmt.Printf("  %schat%s                       Enter conversational AI console with /run, /ecs, /metrics and model switching\n", cyan, reset)
+	fmt.Println(white + bold + " ACCOUNT & APPEARANCE" + reset)
+	fmt.Printf("  %sconfigure%s                  Add/update a profile: name, region (from a list), then keys\n", cyan, reset)
+	fmt.Printf("  %sconfigure <profile>%s        Same, for a specific named profile (e.g. uat, client1)\n", cyan, reset)
+	fmt.Printf("  %sregions%s                    Show a reference list of common region IDs\n", cyan, reset)
+	fmt.Printf("  %sprofiles%s                   List aliyun-cli profiles on this machine\n", cyan, reset)
+	fmt.Printf("  %sprofile <name>%s             Switch the active aliyun-cli profile/region\n", cyan, reset)
+	fmt.Printf("  %sregion <region-id>%s         Switch the active region\n", cyan, reset)
+	fmt.Printf("  %stheme <alibaba|mono>%s       Switch the color theme\n", cyan, reset)
 	fmt.Println()
 	fmt.Println(white + bold + " TERMINAL" + reset)
 	fmt.Printf("  %s↑ / ↓%s  command history     %s← / →%s  move cursor     %sTab%s  autocomplete\n", cyan, reset, cyan, reset, cyan, reset)
 	fmt.Printf("  %sdashboard%s redraw home      %shelp <command>%s detailed help     %sq%s quit\n", cyan, reset, cyan, reset, cyan, reset)
-	fmt.Printf("  %s:<command>%s k9s-style command palette, e.g. :ecs or :chat\n", cyan, reset)
+	fmt.Printf("  %s:<command>%s k9s-style command palette, e.g. :ecs or :bill\n", cyan, reset)
 	fmt.Println()
-	fmt.Println(dim + " Examples: run test pwd • run test 'df -h' • help run • ai --help • metrics --help" + reset)
+	fmt.Println(dim + " Examples: run test pwd • stop eco test • filter status=running • watch 10 • help stop" + reset)
 }
 
 func (a *App) commandHelp(cmd string) error {
@@ -219,7 +224,7 @@ func (a *App) commandHelp(cmd string) error {
 		fmt.Printf("  Run the %q quick diagnostic on the selected ECS.\n", cmd)
 		fmt.Printf("\n  Usage:\n    use <ecs>\n    %s\n", cmd)
 	case "doctor", "d":
-		fmt.Println("  Summarize infrastructure health from ECS inventory and CPU metrics; adds AI analysis when AI is configured.")
+		fmt.Println("  Summarize infrastructure health from ECS inventory and CPU metrics.")
 		fmt.Println("\n  Usage:\n    doctor\n    doctor <instance-id>")
 	case "bill", "$":
 		fmt.Println("  Show account billing for a billing cycle in settlement currency and selected display currency.")
@@ -227,20 +232,52 @@ func (a *App) commandHelp(cmd string) error {
 	case "report":
 		fmt.Println("  Generate a Markdown report from current cloud inventory and billing data.")
 		fmt.Println("\n  Usage:\n    report [output.md]\n\n  Example:\n    report ops-report.md")
-	case "ai", "a":
-		fmt.Println("  Unified AI namespace with automatic provider detection. Explicit A1S_AI_* config wins; otherwise a running local Ollama is detected.")
-		fmt.Println("\n  Usage:\n    ai providers\n    ai use ollama\n    ai use openai-compatible\n    ai models\n    ai model <number|name>\n    ai ask <question>")
-		fmt.Println("\n  Example:\n    ai providers\n    ai use ollama\n    ai model 1\n    chat")
-	case "chat":
-		fmt.Println("  Enter the Hermes-inspired conversational console. Plain text goes to the active AI provider.")
-		fmt.Println("  Cloud actions stay explicit as slash commands, so the model cannot silently run commands.")
-		fmt.Println("\n  Slash commands:\n    /ecs\n    /use <ecs>\n    /run <ecs> <command>\n    /metrics [ecs] [minutes]\n    /doctor [ecs]\n    /providers\n    /models\n    /model <number|name>\n    /clear\n    /exit")
+	case "start":
+		fmt.Println("  Start a stopped ECS instance.")
+		fmt.Println("\n  Usage:\n    start [row|ecs-name|instance-id]\n\n  Example:\n    use test\n    start\n    start web-02")
+	case "stop", "p":
+		fmt.Println("  Stop an ECS instance. Normal stop keeps it billed and ready for a fast restart.")
+		fmt.Println("  Economic stop (\"eco\") pauses vCPU/memory billing for the instance while it stays stopped;")
+		fmt.Println("  this matches the Alibaba Cloud console's economical mode and applies to eligible VPC pay-as-you-go instances.")
+		fmt.Println("\n  Usage:\n    stop [target]                normal stop\n    stop eco [target]            economic stop (billing paused)\n    stop [eco] [target] --force  force stop")
+		fmt.Println("\n  Examples:\n    use test\n    stop\n    stop eco web-02\n    stop --force i-xxxxxxxx")
+		if a.cfg.ReadOnly {
+			fmt.Println("\n  Note: instance actions are disabled because a1s is running with --read-only.")
+		}
+	case "reboot":
+		fmt.Println("  Reboot an ECS instance.")
+		fmt.Println("\n  Usage:\n    reboot [target]\n    reboot [target] --force\n\n  Example:\n    use test\n    reboot")
+	case "terminate", "delete":
+		fmt.Println("  Permanently delete an ECS instance. This is irreversible and asks for confirmation.")
+		fmt.Println("\n  Usage:\n    terminate [target]\n    terminate [target] --force\n\n  Example:\n    terminate web-02")
+	case "filter", "find":
+		fmt.Println("  Narrow the ECS list and working set to matching instances.")
+		fmt.Println("  Plain text matches name, ID, status, type, zone, billing, and IPs. key=value matches one field.")
+		fmt.Println("\n  Usage:\n    filter <text>\n    filter status=running\n    filter zone=me-central-1a\n    filter clear")
+	case "watch", "w":
+		fmt.Println("  Auto-refresh the ECS inventory at a fixed interval, like a live dashboard.")
+		fmt.Println("\n  Usage:\n    watch\n    watch <seconds>\n\n  Example:\n    watch 10\n\n  Stop with Ctrl+C.")
 	case "dashboard":
 		fmt.Println("  Redraw the K9s-inspired context dashboard and reload ECS inventory.")
 		fmt.Println("\n  Usage:\n    dashboard\n    :dashboard")
-	case "ollama":
-		fmt.Println("  Compatibility namespace for local Ollama. Prefer the unified `ai` commands for normal use.")
-		fmt.Println("\n  Usage:\n    ollama status\n    ollama models\n    ollama start\n    ollama use <model>\n    ollama ask <question>")
+	case "configure", "keys":
+		fmt.Println("  Add or update an aliyun-cli profile: pick a name (e.g. uat, client1, client2),")
+		fmt.Println("  pick a region from a reference list (or type any region ID), then enter the")
+		fmt.Println("  AccessKey ID/Secret via the official `aliyun configure` prompt (paste works normally).")
+		fmt.Println("  a1s never stores, logs, or otherwise touches the keys themselves.")
+		fmt.Println("\n  Usage:\n    configure              prompts for a profile name, then the region and keys\n    configure <profile>    configure/add that specific named profile")
+	case "regions":
+		fmt.Println("  Show a reference list of common Alibaba Cloud region IDs.")
+		fmt.Println("\n  Usage:\n    regions")
+	case "profile":
+		fmt.Println("  Switch the active aliyun-cli profile (and its default region, if set).")
+		fmt.Println("\n  Usage:\n    profiles              list available profiles\n    profile <name>        switch profile\n    configure <name>      add a profile that doesn't exist yet")
+	case "region":
+		fmt.Println("  Switch the active Alibaba Cloud region without changing profile.")
+		fmt.Println("\n  Usage:\n    region <region-id>\n    regions               show a reference list of region IDs\n\n  Example:\n    region me-central-1")
+	case "theme":
+		fmt.Println("  Switch the a1s color theme.")
+		fmt.Println("\n  Usage:\n    theme               show the active theme\n    theme alibaba        Alibaba Cloud orange (default)\n    theme mono           low-color, accessible theme")
 	case "currency":
 		fmt.Println("  Change display currency without changing Alibaba Cloud settlement currency.")
 		fmt.Println("\n  Usage:\n    currency USD\n    currency SAR")
@@ -271,7 +308,7 @@ func (a *App) handle(ctx context.Context, line string) error {
 	cmd := strings.ToLower(parts[0])
 	rest := strings.TrimSpace(strings.TrimPrefix(line, parts[0]))
 
-	// Help is available globally and per command: --help, help, help run, run --help, ai --help, etc.
+	// Help is available globally and per command: --help, help, help run, run --help, stop --help, etc.
 	if cmd == "--help" || cmd == "-h" {
 		a.fullHelp()
 		return nil
@@ -293,6 +330,10 @@ func (a *App) handle(ctx context.Context, line string) error {
 		a.dashboard(ctx)
 		if a.cfg.Demo && !a.cfg.SampleData {
 			a.demoNotice()
+			return nil
+		}
+		if !a.checkAccount(ctx) {
+			a.accountNotice()
 			return nil
 		}
 		return a.ecs(ctx)
@@ -379,12 +420,63 @@ func (a *App) handle(ctx context.Context, line string) error {
 			path = parts[1]
 		}
 		return a.makeReport(ctx, path)
-	case "chat":
-		return a.chat(ctx, parts[1:])
-	case "ollama":
-		return a.handleOllama(ctx, parts[1:], strings.TrimSpace(rest))
-	case "ai", "a":
-		return a.handleAI(ctx, parts[1:], rest)
+	case "filter", "find":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
+		if len(parts) < 2 || strings.EqualFold(parts[1], "clear") {
+			a.filter = ""
+			fmt.Println(green + "✓ filter cleared" + reset)
+			return a.ecs(ctx)
+		}
+		a.filter = rest
+		return a.ecs(ctx)
+	case "watch", "w":
+		if err := a.requireCloudData(); err != nil {
+			return err
+		}
+		seconds := 5
+		if len(parts) > 1 {
+			if n, err := strconv.Atoi(parts[1]); err == nil && n > 0 {
+				seconds = n
+			}
+		}
+		return a.watch(ctx, seconds)
+	case "start":
+		return a.lifecycleCommand(ctx, "start", parts[1:])
+	case "stop":
+		return a.lifecycleCommand(ctx, "stop", parts[1:])
+	case "reboot":
+		return a.lifecycleCommand(ctx, "reboot", parts[1:])
+	case "terminate", "delete":
+		return a.lifecycleCommand(ctx, "terminate", parts[1:])
+	case "profiles":
+		return a.showProfiles()
+	case "profile":
+		if len(parts) < 2 {
+			return fmt.Errorf("usage: profile <name>; run `profiles` to list available profiles")
+		}
+		return a.switchProfile(ctx, parts[1])
+	case "region":
+		if len(parts) < 2 {
+			return fmt.Errorf("usage: region <region-id>")
+		}
+		return a.switchRegion(ctx, parts[1])
+	case "regions":
+		a.showRegions()
+		return nil
+	case "configure", "keys":
+		return a.configureProfile(ctx, parts[1:])
+	case "theme":
+		if len(parts) < 2 {
+			fmt.Printf("%sactive theme%s %s%s%s  %savailable: alibaba, mono%s\n", gray, reset, orange, themeName, reset, dim, reset)
+			return nil
+		}
+		if err := setTheme(parts[1]); err != nil {
+			return err
+		}
+		fmt.Printf("%s✓ theme set to%s %s%s%s\n", green, reset, orange, themeName, reset)
+		return nil
 	case "currency":
 		if len(parts) < 2 {
 			return fmt.Errorf("usage: currency USD|SAR")
@@ -404,6 +496,9 @@ func (a *App) handle(ctx context.Context, line string) error {
 func (a *App) requireCloudData() error {
 	if a.cfg.Demo && !a.cfg.SampleData {
 		return fmt.Errorf("UI-only mode has no cloud/sample data; run `a1s` for your real account or `a1s --sample-data` for explicit samples")
+	}
+	if !a.cfg.SampleData && !a.cloudReady {
+		return fmt.Errorf("no Alibaba Cloud account is configured; run `configure` (or `aliyun configure` in another terminal), then `dashboard` to retry")
 	}
 	return nil
 }
@@ -433,117 +528,6 @@ func (a *App) quickOne(ctx context.Context, id, name string) error {
 		return fmt.Errorf("unknown quick command %q", name)
 	}
 	return a.runCmd(ctx, id, cmd)
-}
-
-func (a *App) handleOllama(ctx context.Context, args []string, rest string) error {
-	if len(args) == 0 || strings.EqualFold(args[0], "status") {
-		models, err := a.ollamaModels(ctx)
-		if err != nil {
-			fmt.Printf("%s○ Ollama%s not reachable at %s\n", yellow, reset, a.ollamaURL)
-			fmt.Println(dim + "  Start it with: ollama start" + reset)
-			return nil
-		}
-		fmt.Printf("%s● Ollama%s running at %s • %d local model(s)\n", green, reset, a.ollamaURL, len(models))
-		if a.ollamaModel != "" {
-			fmt.Printf("  active model: %s%s%s\n", orange, a.ollamaModel, reset)
-		}
-		return nil
-	}
-
-	sub := strings.ToLower(args[0])
-	switch sub {
-	case "models", "list", "ls":
-		models, err := a.ollamaModels(ctx)
-		if err != nil {
-			return fmt.Errorf("Ollama is not reachable: %w", err)
-		}
-		fmt.Println()
-		fmt.Println(orange + bold + " OLLAMA MODELS" + reset)
-		if len(models) == 0 {
-			fmt.Println(dim + "  No local models installed." + reset)
-			return nil
-		}
-		for i, m := range models {
-			fmt.Printf("  %s%2d%s  %s\n", orange, i+1, reset, m)
-		}
-		return nil
-	case "use":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: ollama use <model>")
-		}
-		model := args[1]
-		a.ollamaModel = model
-		a.aiProvider = "ollama"
-		a.ai.BaseURL = strings.TrimRight(a.ollamaURL, "/") + "/v1"
-		a.ai.APIKey = "ollama"
-		a.ai.Model = model
-		fmt.Printf("%s✓ Ollama AI enabled%s  %s%s%s\n", green, reset, orange, model, reset)
-		fmt.Println(dim + "  Now use: ai <question>" + reset)
-		return nil
-	case "ask":
-		q := strings.TrimSpace(strings.TrimPrefix(rest, args[0]))
-		if q == "" {
-			return fmt.Errorf("usage: ollama ask <question>")
-		}
-		if a.ollamaModel == "" {
-			return fmt.Errorf("choose a model first: ollama use <model>")
-		}
-		return a.askAI(ctx, q)
-	case "start", "serve":
-		if _, err := exec.LookPath("ollama"); err != nil {
-			return fmt.Errorf("ollama executable not found in PATH")
-		}
-		if _, err := a.ollamaModels(ctx); err == nil {
-			fmt.Println(green + "✓ Ollama is already running." + reset)
-			return nil
-		}
-		cmd := exec.Command("ollama", "serve")
-		logf, err := os.OpenFile("/tmp/a1s-ollama.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err != nil {
-			return err
-		}
-		cmd.Stdout, cmd.Stderr = logf, logf
-		if err := cmd.Start(); err != nil {
-			logf.Close()
-			return err
-		}
-		_ = logf.Close()
-		fmt.Printf("%s✓ Ollama starting%s  pid=%d  log=/tmp/a1s-ollama.log\n", green, reset, cmd.Process.Pid)
-		return nil
-	default:
-		return fmt.Errorf("usage: ollama [status|models|start|use <model>|ask <question>]")
-	}
-}
-
-func (a *App) ollamaModels(ctx context.Context) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(a.ollamaURL, "/")+"/api/tags", nil)
-	if err != nil {
-		return nil, err
-	}
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("Ollama returned %s", resp.Status)
-	}
-	var out struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	models := make([]string, 0, len(out.Models))
-	for _, m := range out.Models {
-		if strings.TrimSpace(m.Name) != "" {
-			models = append(models, m.Name)
-		}
-	}
-	return models, nil
 }
 
 func (a *App) selectInstance(ref string) error {
@@ -621,14 +605,46 @@ func (a *App) resolveInstanceRef(ref string) (string, bool) {
 	return "", false
 }
 
+// resolveTargetOrSelected consumes a leading target argument when it matches
+// a known instance; otherwise it falls back to the currently selected ECS.
+// It returns the remaining args so lifecycle commands can still parse flags
+// like --force after the target.
+func (a *App) resolveTargetOrSelected(args []string) (id, label string, remaining []string, err error) {
+	if len(args) > 0 {
+		if rid, ok := a.resolveInstanceRef(args[0]); ok {
+			return rid, a.labelFor(rid), args[1:], nil
+		}
+	}
+	if a.selectedID != "" {
+		return a.selectedID, blank(a.selectedName, a.selectedID), args, nil
+	}
+	return "", "", nil, fmt.Errorf("select an ECS first with `use <row-number>`, or specify a target: <row|name|instance-id>")
+}
+
+func (a *App) labelFor(id string) string {
+	for _, x := range a.instances {
+		if x.ID == id {
+			return blank(x.Name, x.ID)
+		}
+	}
+	return id
+}
+
 func (a *App) ecs(ctx context.Context) error {
 	xs, err := a.cloud.ListInstances(ctx)
 	if err != nil {
 		return err
 	}
+	if a.filter != "" {
+		xs = filterInstances(xs, a.filter)
+	}
 	a.instances = xs
 	fmt.Println()
-	fmt.Printf(" %s%sECS INSTANCES%s  %s%d resources%s\n", orange, bold, reset, dim, len(xs), reset)
+	if a.filter != "" {
+		fmt.Printf(" %s%sECS INSTANCES%s  %s%d resources%s  %sfilter:%s %s%q%s\n", orange, bold, reset, dim, len(xs), reset, gray, reset, orange, a.filter, reset)
+	} else {
+		fmt.Printf(" %s%sECS INSTANCES%s  %s%d resources%s\n", orange, bold, reset, dim, len(xs), reset)
+	}
 	fmt.Println(dim + " ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────" + reset)
 	fmt.Printf(" %s%-3s %-16s %-20s %-9s %-18s %-17s %-15s %-15s%s\n", gray, "#", "NAME", "INSTANCE ID", "STATUS", "TYPE", "OS", "INTERNAL IP", "EXTERNAL IP", reset)
 	for i, x := range xs {
@@ -709,12 +725,6 @@ func (a *App) doctor(ctx context.Context, id string) error {
 	}
 	text := report.Doctor(xs, m)
 	fmt.Printf("\n%s%sDOCTOR%s\n%s", orange, bold, reset, text)
-	if a.ai.Enabled() {
-		ans, err := a.ai.Ask(ctx, "You are an Alibaba Cloud SRE. Analyze only the supplied operational data. Be concise, separate evidence from suggestions, and never claim a command was run unless output is present.", text)
-		if err == nil {
-			fmt.Println("\n" + orange + bold + "AI ANALYSIS" + reset + "\n" + ans)
-		}
-	}
 	return nil
 }
 
@@ -744,11 +754,6 @@ func (a *App) makeReport(ctx context.Context, path string) error {
 		return err
 	}
 	md := report.Markdown(xs, b, a.cfg.Currency, a.cfg.SARPerUSD)
-	if a.ai.Enabled() {
-		if extra, err := a.ai.Ask(ctx, "You are an Alibaba Cloud operations analyst. Produce a short executive analysis of the following report. Do not invent metrics.", md); err == nil {
-			md += "\n## AI Analysis\n\n" + extra + "\n"
-		}
-	}
 	if err := os.WriteFile(path, []byte(md), 0644); err != nil {
 		return err
 	}
@@ -756,190 +761,53 @@ func (a *App) makeReport(ctx context.Context, path string) error {
 	return nil
 }
 
-func (a *App) askAI(ctx context.Context, q string) error {
-	a.autoDetectAI(ctx)
-	if a.ai == nil || !a.ai.Enabled() {
-		return fmt.Errorf("no AI provider detected; use `ai providers`, start Ollama, or configure A1S_AI_BASE_URL/A1S_AI_MODEL")
-	}
-	var xs []model.ECSInstance
-	if !(a.cfg.Demo && !a.cfg.SampleData) {
-		var err error
-		xs, err = a.cloud.ListInstances(ctx)
-		if err != nil {
-			return err
-		}
-	}
-	ctxText := fmt.Sprintf("Region=%s Currency=%s ECS=%v\nQuestion=%s", a.cfg.Region, a.cfg.Currency, xs, q)
-	ans, err := a.ai.Ask(ctx, "You are a read-only Alibaba Cloud operations copilot inside a1s. Use supplied context. Give safe diagnostic guidance. Commands are suggestions only and require explicit user execution.", ctxText)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("\n%s%sAI COPILOT%s\n%s\n", orange, bold, reset, ans)
-	return nil
-}
-
-func (a *App) handleAI(ctx context.Context, args []string, rest string) error {
-	if len(args) == 0 || strings.EqualFold(args[0], "providers") {
-		return a.showAIProviders(ctx)
-	}
-	sub := strings.ToLower(args[0])
-	switch sub {
-	case "use":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: ai use <ollama|openai-compatible>")
-		}
-		switch strings.ToLower(args[1]) {
-		case "ollama":
-			models, err := a.ollamaModels(ctx)
-			if err != nil {
-				if _, lookErr := exec.LookPath("ollama"); lookErr == nil {
-					return fmt.Errorf("Ollama is installed but not running; use `ollama start`, then `ai use ollama`")
-				}
-				return fmt.Errorf("Ollama unavailable: %w", err)
-			}
-			a.aiProvider = "ollama"
-			a.ai.BaseURL = strings.TrimRight(a.ollamaURL, "/") + "/v1"
-			a.ai.APIKey = "ollama"
-			if len(models) > 0 {
-				if a.ollamaModel == "" {
-					a.ollamaModel = models[0]
-				}
-				a.ai.Model = a.ollamaModel
-			}
-			fmt.Printf("%s✓ AI provider:%s Ollama", green, reset)
-			if a.ai.Model != "" {
-				fmt.Printf(" • %s%s%s", orange, a.ai.Model, reset)
-			}
-			fmt.Println()
-			return a.showAIModels(ctx)
-		case "openai-compatible", "env":
-			if strings.TrimSpace(a.cfg.AIBaseURL) == "" || strings.TrimSpace(a.cfg.AIModel) == "" {
-				return fmt.Errorf("no OpenAI-compatible provider configured; set A1S_AI_BASE_URL and A1S_AI_MODEL")
-			}
-			a.aiProvider = "openai-compatible"
-			a.ai.BaseURL = strings.TrimRight(a.cfg.AIBaseURL, "/")
-			a.ai.APIKey = a.cfg.AIAPIKey
-			a.ai.Model = a.cfg.AIModel
-			fmt.Printf("%s✓ AI provider:%s openai-compatible • %s\n", green, reset, a.ai.Model)
-			return nil
-		default:
-			return fmt.Errorf("unknown provider %q; use `ai providers`", args[1])
-		}
-	case "models":
-		if a.aiProvider == "ollama" || a.aiProvider == "" {
-			return a.showAIModels(ctx)
-		}
-		fmt.Printf("%sactive model%s  %s\n", gray, reset, blank(a.ai.Model, "(not configured)"))
-		return nil
-	case "model":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: ai model <number|name>")
-		}
-		if a.aiProvider != "ollama" {
-			return fmt.Errorf("interactive model discovery is currently available for Ollama; use `ai use ollama` first")
-		}
-		models, err := a.ollamaModels(ctx)
-		if err != nil {
-			return err
-		}
-		choice := args[1]
-		if n, e := strconv.Atoi(choice); e == nil {
-			if n < 1 || n > len(models) {
-				return fmt.Errorf("model number must be 1-%d", len(models))
-			}
-			choice = models[n-1]
-		}
-		found := false
-		for _, m := range models {
-			if m == choice {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("model %q is not installed locally", choice)
-		}
-		a.ai.BaseURL = strings.TrimRight(a.ollamaURL, "/") + "/v1"
-		a.ai.APIKey = "ollama"
-		a.ai.Model = choice
-		a.ollamaModel = choice
-		a.aiProvider = "ollama"
-		fmt.Printf("%s✓ AI model:%s %s%s%s\n", green, reset, orange, choice, reset)
-		return nil
-	case "ask":
-		q := strings.TrimSpace(strings.TrimPrefix(rest, args[0]))
-		if q == "" {
-			return fmt.Errorf("usage: ai ask <question>")
-		}
-		return a.askAI(ctx, q)
-	case "status":
-		return a.showAIProviders(ctx)
-	default:
-		// `ai why is CPU high?` is a shortcut for `ai ask ...`.
-		return a.askAI(ctx, rest)
-	}
-}
-
-func (a *App) showAIModels(ctx context.Context) error {
-	models, err := a.ollamaModels(ctx)
-	if err != nil {
-		return fmt.Errorf("Ollama unavailable: %w", err)
-	}
-	fmt.Println()
-	fmt.Println(orange + bold + " LOCAL AI MODELS" + reset)
-	if len(models) == 0 {
-		fmt.Println(dim + "  No Ollama models installed." + reset)
-		return nil
-	}
-	for i, m := range models {
-		mark := " "
-		if m == a.ai.Model {
-			mark = "›"
-		}
-		fmt.Printf(" %s%s%2d%s  %s\n", orange, mark, i+1, reset, m)
-	}
-	return nil
-}
-
 func (a *App) completions(line string) []string {
 	base := []string{
 		"ecs", "ls", "use ", "run ", "metrics ", "quick", "quick list",
 		"uptime", "disk", "memory", "failed", "ports", "doctor", "bill", "report",
-		"ai", "ai providers", "ai use ollama", "ai use openai-compatible", "ai models", "ai model ", "ai ask ",
-		"chat", "dashboard", "ollama status", "ollama models", "currency SAR", "currency USD",
+		"start ", "stop ", "stop eco ", "reboot ", "terminate ", "delete ",
+		"filter ", "filter clear", "find ", "watch", "watch ",
+		"profiles", "profile ", "region ", "regions", "configure", "configure ", "keys", "theme", "theme alibaba", "theme mono",
+		"dashboard", "currency SAR", "currency USD",
 		"clear", "help", "--help", "quit",
-		":ecs", ":run ", ":metrics ", ":bill", ":chat", ":dashboard", ":help",
+		":ecs", ":run ", ":metrics ", ":bill", ":stop ", ":dashboard", ":help",
 	}
 	trim := strings.TrimSpace(line)
 	out := []string{}
 	palette := strings.HasPrefix(trim, ":")
 	matchTrim := strings.TrimPrefix(trim, ":")
 
-	if strings.HasPrefix(matchTrim, "run ") || strings.HasPrefix(matchTrim, "use ") || strings.HasPrefix(matchTrim, "metrics ") {
+	nameCompleted := []string{"run ", "use ", "metrics ", "start ", "stop ", "reboot ", "terminate ", "delete "}
+	for _, p := range nameCompleted {
+		if !strings.HasPrefix(matchTrim, p) {
+			continue
+		}
 		work := strings.TrimPrefix(strings.TrimSpace(line), ":")
 		parts := strings.Fields(work)
-		if len(parts) <= 2 && len(parts) > 0 {
-			prefix := ""
-			if len(parts) > 1 {
-				prefix = parts[1]
-			}
-			cmd := parts[0] + " "
-			if palette {
-				cmd = ":" + cmd
-			}
-			for _, x := range a.instances {
-				if strings.HasPrefix(strings.ToLower(x.Name), strings.ToLower(prefix)) {
-					suffix := ""
-					if parts[0] == "run" {
-						suffix = " "
-					}
-					out = append(out, cmd+x.Name+suffix)
+		if len(parts) == 0 || len(parts) > 2 {
+			break
+		}
+		prefix := ""
+		if len(parts) > 1 {
+			prefix = parts[1]
+		}
+		cmd := parts[0] + " "
+		if palette {
+			cmd = ":" + cmd
+		}
+		for _, x := range a.instances {
+			if strings.HasPrefix(strings.ToLower(x.Name), strings.ToLower(prefix)) {
+				suffix := ""
+				if parts[0] == "run" {
+					suffix = " "
 				}
-			}
-			if len(out) > 0 {
-				return out
+				out = append(out, cmd+x.Name+suffix)
 			}
 		}
+		if len(out) > 0 {
+			return out
+		}
+		break
 	}
 	for _, c := range base {
 		if strings.HasPrefix(strings.ToLower(c), strings.ToLower(trim)) {

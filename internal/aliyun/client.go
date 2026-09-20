@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
 	"strconv"
 	"strings"
 	"time"
 
-	"a1s/internal/config"
-	"a1s/internal/model"
+	"github.com/PYTHON01100100/a1s/internal/config"
+	"github.com/PYTHON01100100/a1s/internal/model"
 )
 
 type Runner interface {
@@ -37,13 +38,42 @@ func (ExecRunner) Run(ctx context.Context, args ...string) ([]byte, error) {
 type Client struct {
 	cfg    config.Config
 	runner Runner
+	sample []model.ECSInstance
 }
 
 func New(cfg config.Config, r Runner) *Client {
 	if r == nil {
 		r = ExecRunner{}
 	}
-	return &Client{cfg: cfg, runner: r}
+	c := &Client{cfg: cfg, runner: r}
+	if cfg.SampleData {
+		c.sample = sampleInstances(cfg.Region)
+	}
+	return c
+}
+
+// sampleInstances returns deterministic, clearly-fake ECS instances used by
+// `--sample-data` so the UI, lifecycle actions, and diagnostics can be
+// exercised and screenshotted without touching a real Alibaba Cloud account.
+func sampleInstances(region string) []model.ECSInstance {
+	if region == "" {
+		region = "me-central-1"
+	}
+	return []model.ECSInstance{
+		{ID: "i-demo-web01", Name: "web-01", Status: "Running", Type: "ecs.g8i.large", Zone: region + "a", PrivateIP: "10.0.0.11", PublicIP: "47.100.10.11", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PostPaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo01", VSwitchName: "demo-subnet-a"},
+		{ID: "i-demo-web02", Name: "web-02", Status: "Running", Type: "ecs.g8i.large", Zone: region + "a", PrivateIP: "10.0.0.12", PublicIP: "47.100.10.12", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PostPaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo01", VSwitchName: "demo-subnet-a"},
+		{ID: "i-demo-db01", Name: "db-01", Status: "Stopped", Type: "ecs.r8i.large", Zone: region + "b", PrivateIP: "10.0.1.11", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PostPaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo02", VSwitchName: "demo-subnet-b"},
+		{ID: "i-demo-cache01", Name: "cache-01", Status: "Running", Type: "ecs.c8i.large", Zone: region + "a", PrivateIP: "10.0.0.20", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PrePaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo01", VSwitchName: "demo-subnet-a"},
+	}
+}
+
+func (c *Client) sampleIndex(id string) int {
+	for i := range c.sample {
+		if c.sample[i].ID == id {
+			return i
+		}
+	}
+	return -1
 }
 func (c *Client) common(args []string) []string {
 	if c.cfg.Profile != "" {
@@ -57,12 +87,27 @@ func (c *Client) regionArgs(args []string) []string {
 	}
 	return c.common(args)
 }
+// CheckCLI verifies not just that the aliyun binary is installed, but that
+// the active profile actually has usable credentials, by making a lightweight,
+// read-only, region-independent STS call. A binary-only check (e.g. `aliyun
+// version`) would report "ready" even for a freshly installed CLI with no
+// account configured at all.
 func (c *Client) CheckCLI(ctx context.Context) error {
-	_, err := c.runner.Run(ctx, "version")
-	return err
+	if _, err := c.runner.Run(ctx, "version"); err != nil {
+		return fmt.Errorf("aliyun CLI not found or not executable: %w", err)
+	}
+	if _, err := c.runner.Run(ctx, c.common([]string{"sts", "GetCallerIdentity"})...); err != nil {
+		return fmt.Errorf("no usable Alibaba Cloud credentials: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) ListInstances(ctx context.Context) ([]model.ECSInstance, error) {
+	if c.cfg.SampleData {
+		out := make([]model.ECSInstance, len(c.sample))
+		copy(out, c.sample)
+		return out, nil
+	}
 	if c.cfg.Demo {
 		return []model.ECSInstance{}, nil
 	}
@@ -116,6 +161,9 @@ func (c *Client) CPU(ctx context.Context, id string, minutes int) ([]model.Metri
 	if minutes <= 0 {
 		minutes = 60
 	}
+	if c.cfg.SampleData {
+		return sampleCPU(minutes), nil
+	}
 	end := time.Now().UnixMilli()
 	start := time.Now().Add(-time.Duration(minutes) * time.Minute).UnixMilli()
 	dim := fmt.Sprintf(`{"instanceId":"%s"}`, id)
@@ -142,9 +190,32 @@ func (c *Client) CPU(ctx context.Context, id string, minutes int) ([]model.Metri
 	}
 	return pts, nil
 }
+// sampleCPU synthesizes a plausible CPU utilization curve for --sample-data
+// mode so `metrics`/`doctor` have something to show without a real CMS call.
+func sampleCPU(minutes int) []model.MetricPoint {
+	now := time.Now()
+	steps := minutes / 5
+	if steps < 1 {
+		steps = 1
+	}
+	pts := make([]model.MetricPoint, 0, steps)
+	for i := steps; i >= 1; i-- {
+		t := now.Add(-time.Duration(i*5) * time.Minute)
+		avg := 22 + 14*math.Sin(float64(i)/3)
+		if avg < 2 {
+			avg = 2
+		}
+		pts = append(pts, model.MetricPoint{Timestamp: t.UnixMilli(), Average: avg, Maximum: avg + 9, Minimum: math.Max(avg-6, 0)})
+	}
+	return pts
+}
+
 func (c *Client) RunCommand(ctx context.Context, id, command string) (model.CommandResult, error) {
 	if c.cfg.ReadOnly {
 		return model.CommandResult{}, errors.New("read-only mode: command execution is disabled")
+	}
+	if c.cfg.SampleData {
+		return model.CommandResult{InvokeID: "invoke-demo", Status: "Finished", Output: fmt.Sprintf("[sample-data] simulated output for: %s", command), ExitCode: 0}, nil
 	}
 	args := []string{"ecs", "RunCommand", "--Type", "RunShellScript", "--CommandContent", command, "--ContentEncoding", "PlainText", "--InstanceId.1", id, "--KeepCommand", "false"}
 	out, err := c.runner.Run(ctx, c.regionArgs(args)...)
@@ -193,7 +264,107 @@ func (c *Client) invocationResult(ctx context.Context, invokeID, id string) (mod
 	done := status == "Finished" || status == "Failed" || status == "Stopped" || status == "Terminated"
 	return res, done, nil
 }
+// StopMode controls whether Alibaba Cloud keeps billing a stopped instance's
+// vCPU and memory. StopEco ("StopCharging") pauses that billing for eligible
+// VPC pay-as-you-go instances; StopNormal ("KeepCharging") is the standard
+// Alibaba Cloud default and keeps the instance ready for a fast restart.
+type StopMode string
+
+const (
+	StopNormal StopMode = "KeepCharging"
+	StopEco    StopMode = "StopCharging"
+)
+
+func (c *Client) requireWritable() error {
+	if c.cfg.ReadOnly {
+		return errors.New("read-only mode: instance actions are disabled")
+	}
+	return nil
+}
+
+func (c *Client) StartInstance(ctx context.Context, id string) error {
+	if err := c.requireWritable(); err != nil {
+		return err
+	}
+	if c.cfg.SampleData {
+		i := c.sampleIndex(id)
+		if i < 0 {
+			return fmt.Errorf("sample instance %q not found", id)
+		}
+		c.sample[i].Status = "Running"
+		return nil
+	}
+	_, err := c.runner.Run(ctx, c.regionArgs([]string{"ecs", "StartInstance", "--InstanceId", id})...)
+	return err
+}
+
+func (c *Client) StopInstance(ctx context.Context, id string, mode StopMode, force bool) error {
+	if err := c.requireWritable(); err != nil {
+		return err
+	}
+	if c.cfg.SampleData {
+		i := c.sampleIndex(id)
+		if i < 0 {
+			return fmt.Errorf("sample instance %q not found", id)
+		}
+		c.sample[i].Status = "Stopped"
+		return nil
+	}
+	args := []string{"ecs", "StopInstance", "--InstanceId", id}
+	if mode != "" {
+		args = append(args, "--StoppedMode", string(mode))
+	}
+	if force {
+		args = append(args, "--ForceStop", "true")
+	}
+	_, err := c.runner.Run(ctx, c.regionArgs(args)...)
+	return err
+}
+
+func (c *Client) RebootInstance(ctx context.Context, id string, force bool) error {
+	if err := c.requireWritable(); err != nil {
+		return err
+	}
+	if c.cfg.SampleData {
+		i := c.sampleIndex(id)
+		if i < 0 {
+			return fmt.Errorf("sample instance %q not found", id)
+		}
+		c.sample[i].Status = "Running"
+		return nil
+	}
+	args := []string{"ecs", "RebootInstance", "--InstanceId", id}
+	if force {
+		args = append(args, "--ForceStop", "true")
+	}
+	_, err := c.runner.Run(ctx, c.regionArgs(args)...)
+	return err
+}
+
+func (c *Client) DeleteInstance(ctx context.Context, id string, force bool) error {
+	if err := c.requireWritable(); err != nil {
+		return err
+	}
+	if c.cfg.SampleData {
+		i := c.sampleIndex(id)
+		if i < 0 {
+			return fmt.Errorf("sample instance %q not found", id)
+		}
+		c.sample = append(c.sample[:i], c.sample[i+1:]...)
+		return nil
+	}
+	args := []string{"ecs", "DeleteInstance", "--InstanceId", id}
+	if force {
+		args = append(args, "--Force", "true")
+	}
+	_, err := c.runner.Run(ctx, c.regionArgs(args)...)
+	return err
+}
+
 func (c *Client) Bill(ctx context.Context, cycle string) (model.BillSummary, error) {
+	if c.cfg.SampleData {
+		return model.BillSummary{BillingCycle: cycle, PretaxAmount: 128.47, Currency: "USD"}, nil
+	}
 	args := []string{"bssopenapi", "QueryAccountBill", "--BillingCycle", cycle, "--PageNum", "1", "--PageSize", "100"}
 	out, err := c.runner.Run(ctx, c.common(args)...)
 	if err != nil {
