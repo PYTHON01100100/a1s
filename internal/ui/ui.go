@@ -30,6 +30,7 @@ var (
 	red     = "\x1b[38;2;255;92;92m"
 	gray    = "\x1b[38;2;150;158;168m"
 	white   = "\x1b[38;2;235;238;242m"
+	magenta = "\x1b[38;2;186;85;255m" // GPU compute flag; constant across themes like the other status colors
 
 	themeName = "alibaba"
 )
@@ -645,8 +646,11 @@ func (a *App) ecs(ctx context.Context) error {
 	} else {
 		fmt.Printf(" %s%sECS INSTANCES%s  %s%d resources%s\n", orange, bold, reset, dim, len(xs), reset)
 	}
-	fmt.Println(dim + " ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────" + reset)
-	fmt.Printf(" %s%-3s %-16s %-20s %-9s %-18s %-17s %-15s %-15s%s\n", gray, "#", "NAME", "INSTANCE ID", "STATUS", "TYPE", "OS", "INTERNAL IP", "EXTERNAL IP", reset)
+	header := fmt.Sprintf(" %-3s %-16s %-20s %-9s %-22s %-7s %-24s %-15s %-15s %-26s %-28s %-30s %-14s %-24s",
+		"#", "NAME", "INSTANCE ID", "STATUS", "TYPE", "COMPUTE", "OS", "INTERNAL IP", "EXTERNAL IP", "VPC", "VSWITCH", "ZONE (REGION)", "BILLING", "EXPIRES")
+	rule := dim + " " + strings.Repeat("─", len(header)-1) + reset
+	fmt.Println(rule)
+	fmt.Println(gray + header + reset)
 	for i, x := range xs {
 		sc := yellow
 		if strings.EqualFold(x.Status, "Running") {
@@ -658,14 +662,165 @@ func (a *App) ecs(ctx context.Context) error {
 		if x.ID == a.selectedID {
 			marker = "›"
 		}
-		fmt.Printf(" %s%s%-3d%s %-16s %s%-20s%s %s%-9s%s %-18s %-17s %-15s %-15s\n", orange, marker, i+1, reset, clip(blank(x.Name, "-"), 16), dim, clip(x.ID, 20), reset, sc, clip(x.Status, 9), reset, clip(x.Type, 18), clip(blank(x.OSName, x.OSType), 17), clip(blank(x.PrivateIP, "-"), 15), clip(blank(x.PublicIP, "-"), 15))
-		fmt.Printf("     %sBilling:%s %-14s  %sVPC:%s %s (%s)  %svSwitch:%s %s (%s)  %sZone:%s %s\n", gray, reset, blank(x.ChargeType, "-"), gray, reset, blank(x.VPCName, "-"), blank(x.VPCID, "-"), gray, reset, blank(x.VSwitchName, "-"), blank(x.VSwitchID, "-"), gray, reset, blank(x.Zone, "-"))
+		expireText, expireColor := billingExpiry(x)
+		kindText, kindColor := instanceKind(x.Type)
+		fmt.Printf(" %s%s%-3d%s %-16s %s%-20s%s %s%-9s%s %-22s %s %-24s %-15s %-15s %-26s %-28s %-30s %s %s\n",
+			orange, marker, i+1, reset,
+			clip(blank(x.Name, "-"), 16),
+			dim, clip(x.ID, 20), reset,
+			sc, clip(x.Status, 9), reset,
+			clip(x.Type, 22),
+			padColor(kindText, kindColor, 7),
+			clip(blank(x.OSName, x.OSType), 24),
+			clip(blank(x.PrivateIP, "-"), 15),
+			clip(blank(x.PublicIP, "-"), 15),
+			clip(pairLabel(x.VPCName, x.VPCID), 26),
+			clip(pairLabel(x.VSwitchName, x.VSwitchID), 28),
+			clip(zoneLabel(x.Zone), 30),
+			padPlain(billingLabel(x.ChargeType), 14),
+			padColor(expireText, expireColor, 24))
 	}
-	fmt.Println(dim + " ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────" + reset)
+	fmt.Println(rule)
 	if len(xs) > 0 {
 		fmt.Printf(" %sTip:%s run %s%s%s pwd  •  use %s%s%s  •  Tab completes ECS names.\n", dim, reset, cyan, xs[0].Name, reset, cyan, xs[0].Name, reset)
 	}
 	return nil
+}
+
+// billingLabel translates Alibaba Cloud's raw ChargeType into the wording
+// used in the console: PostPaid is pay-as-you-go, PrePaid is a subscription
+// that renews/expires.
+func billingLabel(chargeType string) string {
+	switch chargeType {
+	case "PostPaid":
+		return "Pay-As-You-Go"
+	case "PrePaid":
+		return "Subscription"
+	case "":
+		return "-"
+	default:
+		return chargeType
+	}
+}
+
+// billingExpiry reports when a subscription instance will expire, colored by
+// urgency. Pay-as-you-go instances never expire, so ExpiredTime is ignored
+// for anything that isn't a PrePaid subscription.
+func billingExpiry(x model.ECSInstance) (string, string) {
+	if !strings.EqualFold(x.ChargeType, "PrePaid") {
+		return "-", gray
+	}
+	t, err := parseAlibabaTime(x.ExpiredTime)
+	if err != nil {
+		return "unknown", yellow
+	}
+	days := int(time.Until(t).Hours() / 24)
+	date := t.Format("2006-01-02")
+	switch {
+	case days < 0:
+		return fmt.Sprintf("expired %s", date), red
+	case days <= 7:
+		return fmt.Sprintf("%s (%dd) ⚠ renew", date, days), red
+	case days <= 30:
+		return fmt.Sprintf("%s (%dd)", date, days), yellow
+	default:
+		return fmt.Sprintf("%s (%dd)", date, days), gray
+	}
+}
+
+// instanceKind flags whether an ECS instance type is GPU-accelerated or a
+// plain CPU instance, based on Alibaba Cloud's instance family naming
+// convention embedded in the type string (e.g. ecs.gn7i.*, ecs.vgn6i.*,
+// ecs.ebmgn7.*, ecs.ga1.* are GPU families; ecs.g8i.*, ecs.c8i.*, ecs.r8i.*
+// and similar are CPU-only).
+func instanceKind(instanceType string) (string, string) {
+	family := strings.ToLower(instanceType)
+	if parts := strings.SplitN(family, ".", 3); len(parts) >= 2 {
+		family = parts[1]
+	}
+	if isGPUFamily(family) {
+		return "GPU", magenta
+	}
+	return "CPU", gray
+}
+
+func isGPUFamily(family string) bool {
+	switch {
+	case strings.HasPrefix(family, "ebmgn"):
+		return true
+	case strings.HasPrefix(family, "vgn"):
+		return true
+	case strings.HasPrefix(family, "gn"):
+		return true
+	case len(family) >= 3 && strings.HasPrefix(family, "ga") && family[2] >= '0' && family[2] <= '9':
+		return true
+	}
+	return false
+}
+
+// pairLabel formats a named resource as "name (id)", falling back to just
+// the id (or "-") when the friendly name isn't available.
+func pairLabel(name, id string) string {
+	n := blank(name, "-")
+	if id == "" {
+		return n
+	}
+	return fmt.Sprintf("%s (%s)", n, id)
+}
+
+// zoneLabel shows a zone alongside its region, e.g. "me-central-1a
+// (me-central-1)". Alibaba Cloud zone IDs are the region ID plus one
+// trailing letter, so the region is derived rather than requiring a
+// separate API call.
+func zoneLabel(zone string) string {
+	zone = strings.TrimSpace(zone)
+	if zone == "" {
+		return "-"
+	}
+	region := regionFromZone(zone)
+	if region == "" || region == zone {
+		return zone
+	}
+	return fmt.Sprintf("%s (%s)", zone, region)
+}
+
+func regionFromZone(zone string) string {
+	if len(zone) < 2 {
+		return ""
+	}
+	last := zone[len(zone)-1]
+	if last < 'a' || last > 'z' {
+		return ""
+	}
+	return zone[:len(zone)-1]
+}
+
+func parseAlibabaTime(s string) (time.Time, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty timestamp")
+	}
+	for _, layout := range []string{"2006-01-02T15:04Z", time.RFC3339, "2006-01-02T15:04:05Z", "2006-01-02"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("unrecognized timestamp %q", s)
+}
+
+// padPlain right-pads plain (non-colored) text to a fixed width.
+func padPlain(s string, width int) string {
+	if len(s) >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-len(s))
+}
+
+// padColor pads the plain text to width first, then wraps the whole
+// fixed-width field in color. Coloring before padding would make %-Ns count
+// the invisible ANSI escape bytes as part of the width and break alignment.
+func padColor(s, color string, width int) string {
+	return color + padPlain(s, width) + reset
 }
 
 func (a *App) metrics(ctx context.Context, id string, mins int) error {

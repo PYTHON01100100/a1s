@@ -63,7 +63,8 @@ func sampleInstances(region string) []model.ECSInstance {
 		{ID: "i-demo-web01", Name: "web-01", Status: "Running", Type: "ecs.g8i.large", Zone: region + "a", PrivateIP: "10.0.0.11", PublicIP: "47.100.10.11", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PostPaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo01", VSwitchName: "demo-subnet-a"},
 		{ID: "i-demo-web02", Name: "web-02", Status: "Running", Type: "ecs.g8i.large", Zone: region + "a", PrivateIP: "10.0.0.12", PublicIP: "47.100.10.12", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PostPaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo01", VSwitchName: "demo-subnet-a"},
 		{ID: "i-demo-db01", Name: "db-01", Status: "Stopped", Type: "ecs.r8i.large", Zone: region + "b", PrivateIP: "10.0.1.11", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PostPaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo02", VSwitchName: "demo-subnet-b"},
-		{ID: "i-demo-cache01", Name: "cache-01", Status: "Running", Type: "ecs.c8i.large", Zone: region + "a", PrivateIP: "10.0.0.20", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PrePaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo01", VSwitchName: "demo-subnet-a"},
+		{ID: "i-demo-cache01", Name: "cache-01", Status: "Running", Type: "ecs.c8i.large", Zone: region + "a", PrivateIP: "10.0.0.20", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PrePaid", ExpiredTime: time.Now().AddDate(0, 0, 5).UTC().Format("2006-01-02T15:04Z"), VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo01", VSwitchName: "demo-subnet-a"},
+		{ID: "i-demo-gpu01", Name: "ml-gpu-01", Status: "Running", Type: "ecs.gn7i-c8g1.2xlarge", Zone: region + "a", PrivateIP: "10.0.0.30", OSName: "Alibaba Cloud Linux 3", OSType: "linux", ChargeType: "PostPaid", VPCID: "vpc-demo01", VPCName: "demo-vpc", VSwitchID: "vsw-demo01", VSwitchName: "demo-subnet-a"},
 	}
 }
 
@@ -124,7 +125,7 @@ func (c *Client) ListInstances(ctx context.Context) ([]model.ECSInstance, error)
 	for _, x := range items {
 		m, _ := x.(map[string]any)
 		vpc := digMap(m, "VpcAttributes")
-		res = append(res, model.ECSInstance{ID: str(m["InstanceId"]), Name: str(m["InstanceName"]), Status: str(m["Status"]), Type: str(m["InstanceType"]), Zone: str(m["ZoneId"]), PrivateIP: firstIP(m, "VpcAttributes", "PrivateIpAddress", "IpAddress"), PublicIP: firstIP(m, "PublicIpAddress", "IpAddress"), OSName: str(m["OSName"]), OSType: str(m["OSType"]), ImageID: str(m["ImageId"]), ChargeType: str(m["InstanceChargeType"]), VPCID: str(vpc["VpcId"]), VSwitchID: str(vpc["VSwitchId"])})
+		res = append(res, model.ECSInstance{ID: str(m["InstanceId"]), Name: str(m["InstanceName"]), Status: str(m["Status"]), Type: str(m["InstanceType"]), Zone: str(m["ZoneId"]), PrivateIP: firstIP(m, "VpcAttributes", "PrivateIpAddress", "IpAddress"), PublicIP: firstIP(m, "PublicIpAddress", "IpAddress"), OSName: str(m["OSName"]), OSType: str(m["OSType"]), ImageID: str(m["ImageId"]), ChargeType: str(m["InstanceChargeType"]), ExpiredTime: str(m["ExpiredTime"]), VPCID: str(vpc["VpcId"]), VSwitchID: str(vpc["VSwitchId"])})
 	}
 	c.enrichNetworkNames(ctx, res)
 	return res, nil

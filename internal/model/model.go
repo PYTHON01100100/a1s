@@ -12,6 +12,10 @@ type ECSInstance struct {
 	OSType      string
 	ImageID     string
 	ChargeType  string
+	// ExpiredTime is Alibaba Cloud's ISO8601 renewal/expiry timestamp. It is
+	// only meaningful for PrePaid (subscription) instances; PostPaid
+	// (pay-as-you-go) instances don't expire and this is ignored for them.
+	ExpiredTime string
 	VPCID       string
 	VPCName     string
 	VSwitchID   string
