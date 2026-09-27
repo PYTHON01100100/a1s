@@ -17,6 +17,14 @@ An AI copilot (natural-language questions over collected evidence, a chat
 console) is intentionally deferred to a later release. The current focus is
 making direct instance management fast, predictable, and safe without it.
 
+The UI itself is a full-screen [tview](https://github.com/rivo/tview)
+cockpit in the k9s/e1s/ec2s mold — a live instances table, an info panel for
+the current selection, single-key lifecycle actions, `/` to filter, and a
+`:` command palette for the long tail of operations — themed in Alibaba
+Cloud's orange rather than those tools' teal/fuchsia. `internal/ui`'s
+`App` owns the `aliyun.Client` directly and drives every cloud call from a
+goroutine, reporting back through `tview.Application.QueueUpdateDraw`.
+
 ## Safety model
 
 - `--read-only` disables all mutating actions (start/stop/reboot/terminate/run).

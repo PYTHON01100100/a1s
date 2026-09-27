@@ -2,17 +2,20 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+
+	"flag"
 
 	"github.com/PYTHON01100100/a1s/internal/aliyun"
 	"github.com/PYTHON01100100/a1s/internal/config"
 	"github.com/PYTHON01100100/a1s/internal/ui"
 )
 
-var version = "0.6.0"
+var version = "0.7.0"
 
 func main() {
 	cfg := config.FromEnv()
@@ -27,7 +30,7 @@ func main() {
 		fmt.Fprintln(out, "ACCOUNT")
 		fmt.Fprintln(out, "  a1s auto-detects the current aliyun-cli profile and region and shows only")
 		fmt.Fprintln(out, "  what your Alibaba Cloud account returns. If no account is configured yet,")
-		fmt.Fprintln(out, "  a1s starts anyway and shows how to fix it (or run `configure` inside a1s).")
+		fmt.Fprintln(out, "  a1s starts anyway and shows how to fix it (or the :configure palette command).")
 		fmt.Fprintln(out, "")
 		fmt.Fprintln(out, "OPTIONS")
 		flag.PrintDefaults()
@@ -36,23 +39,14 @@ func main() {
 		fmt.Fprintln(out, "  --demo          UI-only mode. No cloud calls and no data shown.")
 		fmt.Fprintln(out, "  --sample-data   Local fake instances for trying a1s without a real account.")
 		fmt.Fprintln(out, "")
-		fmt.Fprintln(out, "INTERACTIVE")
-		fmt.Fprintln(out, "  ecs                           list ECS inventory")
-		fmt.Fprintln(out, "  use <row|name|instance-id>    select ECS")
-		fmt.Fprintln(out, "  start / stop / reboot         instance lifecycle for the selected ECS")
-		fmt.Fprintln(out, "  stop eco <target>             stop and pause vCPU/memory billing")
-		fmt.Fprintln(out, "  terminate <target>            delete an instance (confirmation required)")
-		fmt.Fprintln(out, "  filter <query>                narrow the ECS list, e.g. filter status=running")
-		fmt.Fprintln(out, "  watch [seconds]                live auto-refreshing ECS view")
-		fmt.Fprintln(out, "  run <ecs-name> <command>      target ECS by name")
-		fmt.Fprintln(out, "  profile <name> / region <id>  switch aliyun-cli profile or region")
-		fmt.Fprintln(out, "  configure [profile]           add/update AccessKey ID, Secret, and region")
-		fmt.Fprintln(out, "  currency USD|SAR              change the display currency")
-		fmt.Fprintln(out, "  theme <alibaba|mono>          switch the color theme")
-		fmt.Fprintln(out, "  :ecs / :run / :bill ...       k9s-style command palette")
-		fmt.Fprintln(out, "  ↑/↓ history, ←/→ cursor, Home/End, Delete, Tab autocomplete (Linux terminals)")
-		fmt.Fprintln(out, "  --help or help             full interactive help")
-		fmt.Fprintln(out, "  <command> --help           detailed help for any interactive command")
+		fmt.Fprintln(out, "KEYBINDINGS (full-screen UI, k9s/e1s/ec2s-style)")
+		fmt.Fprintln(out, "  /                filter the ECS table (text or field=value)")
+		fmt.Fprintln(out, "  s / S / x / R / D  start / stop / economic stop / reboot / terminate")
+		fmt.Fprintln(out, "  E                run a shell command on the selected instance (no SSH)")
+		fmt.Fprintln(out, "  :                command palette: bill, doctor, report, query, metrics, ...")
+		fmt.Fprintln(out, "  ctrl-p           switch aliyun-cli profile")
+		fmt.Fprintln(out, "  ctrl-r           refresh now (also auto-refreshes on its own)")
+		fmt.Fprintln(out, "  ?                help        q / ctrl-c  quit")
 	}
 
 	region := flag.String("region", cfg.Region, "Alibaba Cloud region, e.g. me-central-1")
@@ -83,11 +77,16 @@ func main() {
 	}
 
 	// Account/CLI availability is checked inside the app so a missing or
-	// unconfigured aliyun CLI shows a helpful in-app notice (with a `configure`
-	// command to fix it live) instead of a hard exit before the UI even renders.
+	// unconfigured aliyun CLI shows a helpful in-app notice (with a
+	// :configure palette command to fix it live) instead of a hard exit
+	// before the UI even renders.
 	cloud := aliyun.New(cfg, nil)
-	app := ui.New(cfg, cloud)
-	if err := app.Run(context.Background()); err != nil {
+	app := ui.New(cfg, cloud, version)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if err := app.Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

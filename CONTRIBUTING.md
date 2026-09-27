@@ -5,7 +5,7 @@ are all welcome.
 
 ## Development setup
 
-Requires Go 1.23+.
+Requires Go 1.24+.
 
 ```bash
 git clone https://github.com/PYTHON01100100/a1s.git
@@ -21,8 +21,14 @@ go run ./cmd/a1s --sample-data
 ```
 
 `--sample-data` runs against local, clearly-fake ECS instances, so lifecycle
-actions (`start`, `stop`, `stop eco`, `reboot`, `terminate`), filtering, and
-diagnostics can all be exercised safely.
+actions (start/stop/stop-eco/reboot/terminate), filtering, and diagnostics
+can all be exercised safely.
+
+`a1s` is a full-screen [tview](https://github.com/rivo/tview) terminal UI —
+it needs a real TTY, so it can't be driven by piping commands into stdin.
+To exercise it non-interactively (e.g. for a scripted smoke check), run it
+inside a `tmux` pane and drive it with `tmux send-keys` /
+`tmux capture-pane -p`; see `scripts/smoke-demo.sh` for an example.
 
 ## Project layout
 
@@ -33,7 +39,9 @@ internal/config/    env/aliyun-cli profile detection
 internal/currency/  display currency conversion
 internal/model/     shared data types
 internal/report/    Markdown report generation
-internal/ui/        the interactive terminal UI (commands, rendering, line editor)
+internal/ui/        the tview terminal UI: table/header/footer widgets,
+                     overlays (filter/confirm/help/profiles/command/palette),
+                     and the aliyun.Client-backed action handlers
 ```
 
 ## Before opening a PR
@@ -43,8 +51,10 @@ internal/ui/        the interactive terminal UI (commands, rendering, line edito
   pre-existing line-ending noise in files you didn't change).
 - Keep changes focused — unrelated formatting or refactors make a PR harder
   to review.
-- If you add a command or flag, update `README.md` and the in-app `help` /
-  `--help` text together so they don't drift.
+- If you add a keybinding or palette command, update `README.md`,
+  `internal/ui/help.go`, and (for keybindings) `internal/ui/header.go`'s
+  `headerKeys` / `internal/ui/footer.go`'s `keyHints` together so they don't
+  drift.
 - Add or update a test when you touch `internal/aliyun` (mock the `Runner`
   interface — see `internal/aliyun/client_test.go`) or pure logic like
   filtering/theme switching in `internal/ui`.

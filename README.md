@@ -1,58 +1,65 @@
 # a1s
 
-[![Go](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go)](go.mod)
+[![Go](https://img.shields.io/badge/go-1.24%2B-00ADD8?logo=go)](go.mod)
 [![License: MIT](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-**A fast, keyboard-driven terminal UI for managing Alibaba Cloud ECS instances.**
+**A fast, keyboard-driven, full-screen terminal UI for managing Alibaba Cloud ECS instances.**
 
 `a1s` lets you browse, filter, and operate on your Alibaba Cloud ECS fleet
 without leaving the terminal or clicking through the web console. It talks to
 your account exclusively through the official `aliyun` CLI — `a1s` never
 stores, transmits, or even sees your AccessKey credentials.
 
+`a1s` follows the k9s/e1s/ec2s school of terminal UI: a live, full-screen
+instances table with an info panel and status bar, single-key actions,
+`/` to filter, and a `:` command palette for everything else — themed in
+Alibaba Cloud's own orange instead of those tools' teal/fuchsia.
+
 > 🚧 Screenshots and a demo recording are coming soon.
 
 ## ✨ Features
 
-- 🖥️ **Real-time ECS inventory** — name, instance ID, status, type, OS,
-  internal/external IPs, billing mode, VPC, vSwitch, and zone, in one table.
-- 🔍 **Filter and search** instances by name, status, type, zone, or a
-  specific field (`filter status=running`, `filter zone=me-central-1a`).
-- ⚡ **Full instance lifecycle** — `start`, `stop`, `reboot`, `terminate`.
-  - `stop` supports both Alibaba Cloud stop modes: a **normal** stop (keeps
-    the instance billed and ready for a fast restart) and an **economic**
-    stop (`stop eco`), which pauses vCPU/memory billing while the instance
-    stays stopped — the same behavior as the console's economical mode.
-  - `terminate` always asks for confirmation before deleting anything.
-- 🔄 **Live auto-refresh** (`watch [seconds]`) for a dashboard-style view
-  that updates on an interval until you stop it.
+- 🖥️ **Full-screen, live ECS table** — name, instance ID, status, type,
+  compute kind (CPU/GPU), OS, internal/external IPs, VPC, vSwitch, zone, and
+  billing, all in one auto-refreshing view (also `Ctrl-R` to refresh now).
+- ℹ️ **Info panel** — every field for the selected instance (IDs, CIDRs, ENI,
+  billing/expiry) plus the active keybindings, updated as you move the
+  selection.
+- 🔍 **Filter** instances live as you type (`/`), by plain text or a specific
+  field (`status=running`, `zone=me-central-1a`).
+- ⚡ **Full instance lifecycle**, one key each: `s` start, `S` stop, `x`
+  economic stop (pauses vCPU/memory billing while stopped — the console's
+  economical mode), `R` reboot, `D` terminate. Anything destructive or
+  disruptive asks you to confirm first; starting never does.
+- 💻 **Remote command execution** through Alibaba Cloud Cloud Assistant, no
+  SSH required — `E` runs any shell command on the selected instance, with
+  its output in a scrollable pane.
+- 🧰 **`:` command palette** (k9s-style) for everything else: `bill`,
+  `doctor`, `report`, `query`, `metrics`, `run`, the `uptime`/`disk`/`memory`/
+  `failed`/`ports`/`quick` diagnostics, `currency`, `theme`, `profile`,
+  `region`, `regions`, `profiles`, and `configure`.
 - 🌍 **Multi-profile / multi-region** — auto-detects your current
-  `aliyun-cli` profile and region, and lets you switch (`profiles`,
-  `profile <name>`, `region <region-id>`) without restarting.
-- 🔐 **Guided setup, credential-free by design** — `configure` walks you
-  through naming a profile (`uat`, `client1`, `client2`, ...), picking a
-  region from a reference list (or typing any region ID), then enters the
-  official `aliyun configure` for the AccessKey ID/Secret — where pasting
-  works exactly like any other terminal prompt. `a1s` itself never reads,
-  stores, or logs your keys.
-- 💻 **Remote command execution** through Alibaba Cloud Cloud Assistant
-  (`run <ecs> <command>`), plus safe one-word diagnostics (`uptime`, `disk`,
-  `memory`, `failed`, `ports`, `quick`).
-- 💰 **FinOps basics** — `bill`, `doctor` (health summary), and `report`
-  (writes a Markdown operations report). Display currency (`currency
+  `aliyun-cli` profile and region, and lets you switch with `Ctrl-P` (or the
+  `:profile <name>` / `:region <id>` palette commands) without restarting.
+- 🔐 **Guided setup, credential-free by design** — `:configure [name]` hands
+  the terminal to the official, interactive `aliyun configure` for the
+  AccessKey ID/Secret — pasting works exactly like any other terminal
+  prompt, and `a1s` itself never reads, stores, or logs your keys.
+- 💰 **FinOps basics** — `:bill`, `:doctor` (health summary), and `:report`
+  (writes a Markdown operations report). Display currency (`:currency
   USD|SAR`) is switchable live, independent of your account's settlement
   currency.
 - 🎨 **Professional, Alibaba Cloud–branded UI** — the default theme uses
   Alibaba Cloud's orange, with a low-color `mono` theme available
-  (`theme alibaba` / `theme mono`). Status colors (running/stopped/warning)
+  (`:theme alibaba` / `:theme mono`). Status colors (running/stopped/warning)
   never change between themes, so meaning always stays consistent.
 - 🛑 **Safe by default** — `--read-only` disables every mutating action
   (start/stop/reboot/terminate/run), and destructive actions always confirm.
 
 ## 📦 Installation
 
-Requires Go 1.23+.
+Requires Go 1.24+.
 
 ```bash
 go install github.com/PYTHON01100100/a1s/cmd/a1s@latest
@@ -97,27 +104,35 @@ configured](#getting-an-account-configured) below).
 ### Inside the app
 
 ```text
-ecs                       list instances
-use 1                     select an instance by row, name, or ID
-stop eco web-01           economic stop (billing paused while stopped)
-stop web-02               normal stop
-reboot cache-01
-terminate db-01           asks for confirmation before deleting
-filter status=running
-watch 10                  live-refresh every 10s (Ctrl+C to stop)
-run web-01 uptime
-configure                 add a profile: name it, pick a region, then keys
-regions                   show a reference list of region IDs
-profiles / profile <name> / region <region-id>
-currency SAR              change the display currency, any time
-theme mono / theme alibaba
-bill 2026-08
-doctor
-report ops-report.md
-help                      full command reference
-```
+/                filter the table (plain text, or field=value e.g. status=running)
+g / G            jump to top / bottom
+s                start the selected instance
+S                stop normally
+x                economic stop (billing paused while stopped)
+R                reboot
+D                terminate (asks for confirmation, irreversible)
+E                run a shell command on the selected instance (no SSH)
+Ctrl-P           switch aliyun-cli profile/region
+Ctrl-R           refresh now (also auto-refreshes on its own)
+?                help
+q / Ctrl-C       quit
 
-Every command also has its own `--help`, e.g. `stop --help`.
+: command palette, e.g.:
+  :bill 2026-08
+  :doctor
+  :report ops-report.md
+  :query vpc=vpc-xxxx
+  :metrics 30
+  :run uptime
+  :quick                    # uptime + disk + memory + failed + ports
+  :currency SAR
+  :theme mono
+  :profile uat
+  :region me-central-1
+  :regions
+  :profiles
+  :configure uat            # add/update a profile: name it, pick a region, then keys
+```
 
 ## Getting an account configured
 
@@ -127,13 +142,14 @@ anyway and tells you so right in the UI, with a way to fix it without
 leaving the app:
 
 ```text
-configure              # name a profile, pick a region from a list, then add your keys
-dashboard              # reload once your account is ready
+:configure              # name a profile, pick a region from a list, then add your keys
+Ctrl-R                  # reload once your account is ready
 ```
 
-`configure` also works for multiple accounts — run `configure uat`,
-`configure client1`, `configure client2`, etc. to add or update named
-profiles, then switch between them any time with `profile <name>`.
+`:configure` also works for multiple accounts — run `:configure uat`,
+`:configure client1`, `:configure client2`, etc. to add or update named
+profiles, then switch between them any time with `Ctrl-P` or
+`:profile <name>`.
 
 Prefer not to use real credentials yet? Run `a1s --sample-data` to try
 everything — lifecycle actions included — against local, clearly-fake
